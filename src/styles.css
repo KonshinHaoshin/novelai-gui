@@ -609,6 +609,22 @@ select:focus {
   font-size: 11px;
 }
 
+.prompt-library-images {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+}
+
+.prompt-library-images img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  object-fit: cover;
+}
+
 .prompt-library-item em {
   display: -webkit-box;
   max-height: 4.1em;

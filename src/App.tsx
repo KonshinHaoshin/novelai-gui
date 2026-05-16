@@ -154,6 +154,13 @@ type PromptLibraryEntry = {
     slug: string;
     title: string;
   } | null;
+  examples?: Array<{
+    id: number;
+    label: string;
+    kind: string;
+    url: string;
+    metadata?: Record<string, unknown>;
+  }>;
 };
 
 const HISTORY_KEY = "novelai-gui-history";
@@ -1261,6 +1268,7 @@ function App() {
                 >
                   <strong>{entry.title}</strong>
                   <span>{entry.category?.name ?? promptEntryTypeLabel(entry.entry_type)} · {entry.source?.title ?? "本地素材库"}</span>
+                  <PromptEntryImages entry={entry} />
                   <em>{entry.prompt}</em>
                 </button>
               ))}
@@ -1454,6 +1462,21 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
   );
 }
 
+function PromptEntryImages(props: { entry: PromptLibraryEntry }) {
+  const images = getPromptEntryImages(props.entry);
+  if (images.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="prompt-library-images" aria-hidden="true">
+      {images.map((example) => (
+        <img key={`${props.entry.slug}-${example.id}`} src={example.url} alt="" loading="lazy" />
+      ))}
+    </div>
+  );
+}
+
 function loadSettings(): AppSettings {
   try {
     const value = localStorage.getItem(SETTINGS_KEY);
@@ -1527,6 +1550,12 @@ function promptEntryTypeLabel(type: PromptEntryType) {
   }
 
   return "角色";
+}
+
+function getPromptEntryImages(entry: PromptLibraryEntry) {
+  return (entry.examples ?? [])
+    .filter((example) => example.kind === "image" && example.url)
+    .slice(0, 3);
 }
 
 function isTauriRuntime() {
