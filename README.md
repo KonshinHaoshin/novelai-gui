@@ -41,4 +41,3 @@ Authorization: Bearer <your_token>
 
 - Primary API: https://api.novelai.net/docs/
 - Image API: https://image.novelai.net/docs/index.html
-

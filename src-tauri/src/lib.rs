@@ -3,10 +3,12 @@ use base64::Engine;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::fs::OpenOptions;
+use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const SERVICE_NAME: &str = "novel-gui";
+const SERVICE_NAME: &str = "novelai-gui";
 const ACCOUNT_NAME: &str = "novelai-api-token";
 const GENERATE_IMAGE_URL: &str = "https://image.novelai.net/ai/generate-image";
 const USER_DATA_URL: &str = "https://api.novelai.net/user/data";
@@ -208,6 +210,34 @@ fn save_generated_image(file_name: String, base64: String) -> Result<String, Str
     Ok(dir.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn append_app_log(level: String, source: String, message: String) -> Result<String, String> {
+    let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    dir.push("novelai-gui");
+    dir.push("logs");
+    fs::create_dir_all(&dir).map_err(to_error)?;
+
+    let mut file_path = dir;
+    file_path.push("novelai-gui.log.txt");
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(to_error)?
+        .as_secs();
+    let level = sanitize_log_field(&level).to_ascii_uppercase();
+    let source = sanitize_log_field(&source);
+    let message = sanitize_log_message(&message);
+    let line = format!("[{timestamp}] [{level}] [{source}] {message}\n");
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file_path)
+        .map_err(to_error)?;
+    file.write_all(line.as_bytes()).map_err(to_error)?;
+    Ok(file_path.to_string_lossy().to_string())
+}
+
 fn read_token() -> Result<String, String> {
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
     match entry.get_password() {
@@ -354,6 +384,23 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
+fn sanitize_log_field(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .collect::<String>();
+    if cleaned.is_empty() {
+        "app".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn sanitize_log_message(value: &str) -> String {
+    let collapsed = value.replace(['\r', '\n'], " ");
+    collapsed.chars().take(4000).collect()
+}
+
 fn to_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -370,7 +417,8 @@ pub fn run() {
             save_api_token,
             get_account_status,
             generate_image,
-            save_generated_image
+            save_generated_image,
+            append_app_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -32,6 +32,7 @@ Thumbs.db
 AGENTS.md
 .playwright-mcp/
 .plan/
+server/
 
 # Test artifacts
 playwright-report/

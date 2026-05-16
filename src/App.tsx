@@ -18,10 +18,12 @@ import {
   SlidersHorizontal,
   Sparkles,
   RefreshCw,
+  Upload,
   WandSparkles,
   ZoomIn,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, ClipboardEvent } from "react";
 import appIcon from "../icon.png";
 
 type ImageAction = "generate" | "img2img" | "infill";
@@ -72,6 +74,12 @@ type HistoryItem = {
   images: GeneratedImage[];
 };
 
+type PersistedHistoryItem = {
+  id: string;
+  createdAt: string;
+  request: ImageRequest;
+};
+
 type Notice = {
   type: "success" | "error" | "info";
   message: string;
@@ -79,6 +87,7 @@ type Notice = {
 
 type AppSettings = {
   showPayloadPreview: boolean;
+  enableAppLogs: boolean;
   historyDisplayLimit: number;
 };
 
@@ -90,12 +99,36 @@ type AccountSummary = {
   raw: unknown;
 };
 
-const HISTORY_KEY = "novel-gui-history";
-const SETTINGS_KEY = "novel-gui-settings";
+type PngTextChunk = {
+  keyword: string;
+  text: string;
+};
+
+type ImportedImageMetadata = {
+  prompt?: string;
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  scale?: number;
+  cfgRescale?: number;
+  seed?: number;
+  sampler?: string;
+  noiseSchedule?: string;
+  model?: string;
+  nSamples?: number;
+};
+
+const HISTORY_KEY = "novelai-gui-history";
+const SETTINGS_KEY = "novelai-gui-settings";
+const HISTORY_DB_NAME = "novelai-gui";
+const HISTORY_DB_VERSION = 1;
+const HISTORY_STORE_NAME = "history";
 const MAX_HISTORY_ITEMS = 40;
 
 const DEFAULT_SETTINGS: AppSettings = {
   showPayloadPreview: false,
+  enableAppLogs: false,
   historyDisplayLimit: 8,
 };
 
@@ -157,7 +190,7 @@ const SIZE_PRESETS = [
 
 function App() {
   const [request, setRequest] = useState<ImageRequest>(DEFAULT_REQUEST);
-  const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory());
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [activeImages, setActiveImages] = useState<GeneratedImage[]>([]);
   const [selectedImage, setSelectedImage] = useState(0);
   const [token, setToken] = useState("");
@@ -171,6 +204,8 @@ function App() {
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [isRefreshingAccount, setIsRefreshingAccount] = useState(false);
   const [lastCost, setLastCost] = useState<number | null>(null);
+  const [historyReady, setHistoryReady] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -189,12 +224,63 @@ function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY_ITEMS)));
-  }, [history]);
+    if (!historyReady) {
+      return;
+    }
+
+    void saveHistoryToIndexedDb(history.slice(0, MAX_HISTORY_ITEMS)).catch((error) => {
+      console.error(error);
+      setNotice({ type: "error", message: "历史记录写入失败，请稍后重试。" });
+    });
+  }, [history, historyReady]);
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const loaded = await loadHistoryFromIndexedDb();
+      if (cancelled) {
+        return;
+      }
+      setHistory(loaded);
+      setHistoryReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    function onWindowPaste(event: globalThis.ClipboardEvent) {
+      if (activePanel !== "generate") {
+        return;
+      }
+
+      const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) =>
+        item.type.startsWith("image/"),
+      );
+      if (!imageItem) {
+        return;
+      }
+
+      const file = imageItem.getAsFile();
+      if (!file) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void importPngFile(file);
+    }
+
+    window.addEventListener("paste", onWindowPaste, true);
+    return () => window.removeEventListener("paste", onWindowPaste, true);
+  }, [activePanel]);
 
   const currentImage = activeImages[selectedImage];
   const visibleHistory = history.slice(0, settings.historyDisplayLimit);
@@ -214,9 +300,12 @@ function App() {
       setToken("");
       setHasToken(true);
       showNotice("success", "Token 已保存到系统凭据。");
+      writeAppLog("success", "token", "API Token 已保存到系统凭据。");
       refreshAccountStatus(false);
     } catch (error) {
-      showNotice("error", String(error));
+      const message = String(error);
+      showNotice("error", message);
+      writeAppLog("error", "token", message);
     }
   }
 
@@ -233,11 +322,13 @@ function App() {
       const raw = await invoke<unknown>("get_account_status");
       const summary = summarizeAccount(raw);
       setAccount(summary);
+      writeAppLog("success", "account", describeAccountStatus(summary));
       if (showResult) {
         showNotice("success", "账号状态已刷新。");
       }
       return summary;
     } catch (error) {
+      writeAppLog("error", "account", String(error));
       if (showResult) {
         showNotice("error", String(error));
       }
@@ -260,6 +351,7 @@ function App() {
 
     setIsGenerating(true);
     setNotice(null);
+    writeAppLog("info", "generate", `开始生成：${request.model} · ${request.width}×${request.height} · ${request.action}`);
     const beforeAccount = await refreshAccountStatus(false);
     try {
       const response = await invoke<GenerateImageResponse>("generate_image", { request });
@@ -276,6 +368,11 @@ function App() {
           ...items,
         ].slice(0, MAX_HISTORY_ITEMS),
       );
+      writeAppLog(
+        "success",
+        "generate",
+        `生成完成：${response.images.length} 张图，响应类型 ${response.contentType}。`,
+      );
       const afterAccount = await refreshAccountStatus(false);
       const cost = calculateAccountCost(beforeAccount, afterAccount);
       setLastCost(cost);
@@ -286,7 +383,18 @@ function App() {
           : `收到 ${response.images.length} 张图，本次消耗 ${formatPoints(cost)} 点。`,
       );
     } catch (error) {
-      showNotice("error", String(error));
+      const message = String(error);
+      writeAppLog(
+        message.includes("Concurrent generation is locked") ? "warning" : "error",
+        "generate",
+        message,
+      );
+      showNotice(
+        "error",
+        message.includes("Concurrent generation is locked")
+          ? "当前账号已有一个并发生图任务正在运行，请等待它完成后再试。"
+          : message,
+      );
     } finally {
       setIsGenerating(false);
     }
@@ -304,8 +412,11 @@ function App() {
         base64: image.base64,
       });
       showNotice("success", `已保存到 ${path}`);
+      writeAppLog("success", "save-image", `已保存图片：${path}`);
     } catch (error) {
-      showNotice("error", String(error));
+      const message = String(error);
+      showNotice("error", message);
+      writeAppLog("error", "save-image", message);
     }
   }
 
@@ -328,7 +439,86 @@ function App() {
     setHistory([]);
     setActiveImages([]);
     setSelectedImage(0);
+    void saveHistoryToIndexedDb([]);
     showNotice("success", "历史记录已清除。");
+    writeAppLog("info", "history", "已清除历史记录。");
+  }
+
+  function writeAppLog(level: "info" | "success" | "warning" | "error", source: string, message: string) {
+    if (!settings.enableAppLogs || !isTauriRuntime()) {
+      return;
+    }
+
+    void invoke("append_app_log", { level, source, message }).catch((error) => {
+      console.error("Failed to write app log", error);
+    });
+  }
+
+  function describeAccountStatus(summary: AccountSummary) {
+    const tier = summary.tier ?? "未知";
+    const points = formatOptionalPoints(summary.points);
+    const active = summary.active === undefined ? "未知" : summary.active ? "有效" : "无效";
+    return `账号状态：Tier ${tier}，点数 ${points}，订阅 ${active}。`;
+  }
+
+  async function importPngFile(file: File) {
+    try {
+      const imported = parseNovelAiPngMetadata(await file.arrayBuffer());
+      if (!imported.prompt && !imported.negativePrompt) {
+        showNotice("info", "PNG 中没有识别到 NovelAI prompt。");
+        writeAppLog("warning", "png-import", `${file.name} 没有识别到 NovelAI prompt。`);
+        return;
+      }
+
+      setRequest((current) => ({
+        ...current,
+        prompt: imported.prompt ?? current.prompt,
+        negativePrompt: imported.negativePrompt ?? current.negativePrompt,
+        width: imported.width ?? current.width,
+        height: imported.height ?? current.height,
+        steps: imported.steps ?? current.steps,
+        scale: imported.scale ?? current.scale,
+        cfgRescale: imported.cfgRescale ?? current.cfgRescale,
+        seed: imported.seed ?? current.seed,
+        sampler: imported.sampler ?? current.sampler,
+        noiseSchedule: imported.noiseSchedule ?? current.noiseSchedule,
+        model: imported.model ?? current.model,
+        nSamples: imported.nSamples ?? current.nSamples,
+      }));
+      showNotice("success", "已从 PNG 元数据导入 prompt 和生成参数。");
+      writeAppLog("success", "png-import", `已导入 ${file.name} 的 PNG 元数据。`);
+    } catch (error) {
+      const message = `解析 PNG 元数据失败：${String(error)}`;
+      showNotice("error", message);
+      writeAppLog("error", "png-import", message);
+    }
+  }
+
+  async function handlePaste(event: ClipboardEvent<HTMLElement>) {
+    if (activePanel !== "generate") {
+      return;
+    }
+
+    const imageItem = Array.from(event.clipboardData.items).find((item) => item.type.startsWith("image/"));
+    if (!imageItem) {
+      return;
+    }
+
+    const file = imageItem.getAsFile();
+    if (!file) {
+      return;
+    }
+
+    event.preventDefault();
+    await importPngFile(file);
+  }
+
+  async function handleImportInput(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (file) {
+      await importPngFile(file);
+    }
   }
 
   function showNotice(type: Notice["type"], message: string) {
@@ -337,6 +527,15 @@ function App() {
 
   return (
     <main className="studio-shell">
+      <input
+        ref={importInputRef}
+        accept="image/png"
+        aria-hidden="true"
+        className="hidden-file-input"
+        onChange={handleImportInput}
+        tabIndex={-1}
+        type="file"
+      />
       <nav className="nav-rail" aria-label="Main navigation">
         <div className="nav-logo">
           <img src={appIcon} alt="NovelAI GUI" />
@@ -377,9 +576,18 @@ function App() {
           <div className="card-head">
             <div>
               <h2>正向提示词</h2>
-              <p>主要画面描述</p>
             </div>
-            <span>{request.prompt.length}</span>
+            <div className="prompt-actions">
+              <button
+                className="ghost-button"
+                onClick={() => importInputRef.current?.click()}
+                type="button"
+              >
+                <Upload aria-hidden="true" />
+                从图片导入
+              </button>
+              <span>{request.prompt.length}</span>
+            </div>
           </div>
           <textarea
             className="prompt-textarea primary"
@@ -764,6 +972,11 @@ function App() {
                   checked={settings.showPayloadPreview}
                   onChange={(value) => updateSetting("showPayloadPreview", value)}
                 />
+                <Toggle
+                  label="启用应用日志"
+                  checked={settings.enableAppLogs}
+                  onChange={(value) => updateSetting("enableAppLogs", value)}
+                />
                 <NumberField
                   label="历史显示上限"
                   value={settings.historyDisplayLimit}
@@ -859,15 +1072,6 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
   );
 }
 
-function loadHistory(): HistoryItem[] {
-  try {
-    const value = localStorage.getItem(HISTORY_KEY);
-    return value ? JSON.parse(value) : [];
-  } catch {
-    return [];
-  }
-}
-
 function loadSettings(): AppSettings {
   try {
     const value = localStorage.getItem(SETTINGS_KEY);
@@ -878,6 +1082,7 @@ function loadSettings(): AppSettings {
     const parsed = JSON.parse(value) as Partial<AppSettings>;
     return {
       showPayloadPreview: parsed.showPayloadPreview ?? DEFAULT_SETTINGS.showPayloadPreview,
+      enableAppLogs: parsed.enableAppLogs ?? DEFAULT_SETTINGS.enableAppLogs,
       historyDisplayLimit: clampHistoryLimit(
         parsed.historyDisplayLimit ?? DEFAULT_SETTINGS.historyDisplayLimit,
       ),
@@ -1094,6 +1299,374 @@ function clampHistoryLimit(value: number) {
   }
 
   return Math.min(MAX_HISTORY_ITEMS, Math.max(1, Math.round(value)));
+}
+
+async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {
+  const legacy = migrateLegacyHistoryFromLocalStorage();
+  if (legacy) {
+    await saveHistoryToIndexedDb(legacy);
+    localStorage.removeItem(HISTORY_KEY);
+    return sortHistory(legacy);
+  }
+
+  if (!("indexedDB" in window)) {
+    return [];
+  }
+
+  const db = await openHistoryDatabase();
+  try {
+    const tx = db.transaction(HISTORY_STORE_NAME, "readonly");
+    const store = tx.objectStore(HISTORY_STORE_NAME);
+    const items = (await requestToPromise<HistoryItem[]>(store.getAll())) ?? [];
+    return sortHistory(items);
+  } finally {
+    db.close();
+  }
+}
+
+async function saveHistoryToIndexedDb(history: HistoryItem[]) {
+  if (!("indexedDB" in window)) {
+    return;
+  }
+
+  const db = await openHistoryDatabase();
+  try {
+    const tx = db.transaction(HISTORY_STORE_NAME, "readwrite");
+    const store = tx.objectStore(HISTORY_STORE_NAME);
+    await requestToPromise(store.clear());
+    for (const item of sortHistory(history)) {
+      await requestToPromise(store.put(item));
+    }
+    await transactionDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
+function migrateLegacyHistoryFromLocalStorage() {
+  try {
+    const value = localStorage.getItem(HISTORY_KEY);
+    if (!value) {
+      return null;
+    }
+
+    const parsed = JSON.parse(value) as PersistedHistoryItem[];
+    return parsed.map((item) => ({
+      id: item.id,
+      createdAt: item.createdAt,
+      request: item.request,
+      images: [],
+    }));
+  } catch {
+    return null;
+  }
+}
+
+function openHistoryDatabase() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = window.indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(HISTORY_STORE_NAME)) {
+        db.createObjectStore(HISTORY_STORE_NAME, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Failed to open IndexedDB"));
+  });
+}
+
+function requestToPromise<T = unknown>(request: IDBRequest<T>) {
+  return new Promise<T>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function transactionDone(transaction: IDBTransaction) {
+  return new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+  });
+}
+
+function sortHistory(history: HistoryItem[]) {
+  return [...history].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function parseNovelAiPngMetadata(buffer: ArrayBuffer): ImportedImageMetadata {
+  const chunks = readPngTextChunks(buffer);
+  const texts = new Map<string, string>();
+
+  for (const chunk of chunks) {
+    texts.set(chunk.keyword.toLowerCase(), chunk.text);
+  }
+
+  const rawCandidates = [
+    texts.get("comment"),
+    texts.get("description"),
+    texts.get("parameters"),
+    texts.get("prompt"),
+    ...texts.values(),
+  ].filter(Boolean) as string[];
+
+  const parsedObjects: unknown[] = [];
+  for (const value of rawCandidates) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        parsedObjects.push(JSON.parse(trimmed));
+      } catch {
+        // keep going with raw text candidates
+      }
+    }
+  }
+
+  const prompt =
+    findStringInSources(parsedObjects, ["prompt", "input"]) ??
+    findNestedCaptionText(parsedObjects, "v4_prompt") ??
+    parsePromptTextFromMetadataStrings(rawCandidates) ??
+    texts.get("comment") ??
+    texts.get("description");
+  const negativePrompt =
+    findStringInSources(parsedObjects, ["negative_prompt", "negativeprompt", "uc", "negative"]) ??
+    findNestedCaptionText(parsedObjects, "v4_negative_prompt") ??
+    parseNegativePromptFromMetadataStrings(rawCandidates) ??
+    undefined;
+
+  const width = findNumberInSources(parsedObjects, ["width"]);
+  const height = findNumberInSources(parsedObjects, ["height"]);
+  const steps = findNumberInSources(parsedObjects, ["steps"]);
+  const scale = findNumberInSources(parsedObjects, ["scale"]);
+  const cfgRescale = findNumberInSources(parsedObjects, ["cfg_rescale", "cfgrescale"]);
+  const seed = findNumberInSources(parsedObjects, ["seed"]);
+  const sampler = findStringInSources(parsedObjects, ["sampler"]);
+  const noiseSchedule = findStringInSources(parsedObjects, ["noise_schedule", "noiseschedule"]);
+  const model = findStringInSources(parsedObjects, ["model"]);
+  const nSamples = findNumberInSources(parsedObjects, ["n_samples", "nsamples"]);
+
+  return {
+    prompt: extractPromptText(prompt),
+    negativePrompt: extractPromptText(negativePrompt),
+    width,
+    height,
+    steps,
+    scale,
+    cfgRescale,
+    seed,
+    sampler,
+    noiseSchedule,
+    model,
+    nSamples,
+  };
+}
+
+function extractPromptText(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function findStringInSources(sources: unknown[], keys: string[]) {
+  for (const source of sources) {
+    const found = findStringByKeys(source, keys);
+    if (found) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+function findNumberInSources(sources: unknown[], keys: string[]) {
+  for (const source of sources) {
+    const found = findNumberByKeys(source, keys);
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+function parsePromptTextFromMetadataStrings(values: string[]) {
+  for (const value of values) {
+    const prompt = extractFieldFromText(value, ["prompt", "positive prompt"]);
+    if (prompt) {
+      return prompt;
+    }
+  }
+  return undefined;
+}
+
+function parseNegativePromptFromMetadataStrings(values: string[]) {
+  for (const value of values) {
+    const negative = extractFieldFromText(value, ["negative prompt", "uc"]);
+    if (negative) {
+      return negative;
+    }
+  }
+  return undefined;
+}
+
+function extractFieldFromText(text: string, labels: string[]) {
+  const normalized = text.replace(/\r\n/g, "\n");
+  for (const label of labels) {
+    const pattern = new RegExp(`(?:^|\\n)\\s*${escapeRegExp(label)}\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*[A-Za-z][A-Za-z _-]*\\s*:\\s*|$)`, "i");
+    const match = normalized.match(pattern);
+    if (match?.[1]) {
+      const value = match[1].trim();
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function findNestedCaptionText(sources: unknown[], key: string) {
+  for (const source of sources) {
+    const candidate = findByKeys(source, [key]);
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+
+    const caption = findByKeys(candidate, ["caption"]);
+    if (!caption || typeof caption !== "object") {
+      continue;
+    }
+
+    const baseCaption = findStringByKeys(caption, ["base_caption"]);
+    if (baseCaption) {
+      return baseCaption;
+    }
+  }
+
+  return undefined;
+}
+
+function readPngTextChunks(buffer: ArrayBuffer): PngTextChunk[] {
+  const bytes = new Uint8Array(buffer);
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (signature.some((value, index) => bytes[index] !== value)) {
+    throw new Error("不是有效的 PNG 文件");
+  }
+
+  const chunks: PngTextChunk[] = [];
+  let offset = 8;
+
+  while (offset + 12 <= bytes.length) {
+    const length = readUint32(bytes, offset);
+    const type = readAscii(bytes, offset + 4, 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > bytes.length) {
+      break;
+    }
+
+    if (type === "tEXt") {
+      const data = readBytes(bytes, dataStart, length);
+      const separator = data.indexOf(0);
+      if (separator > 0) {
+        const keyword = decodeText(data.slice(0, separator));
+        const text = decodeText(data.slice(separator + 1));
+        chunks.push({ keyword, text });
+      }
+    } else if (type === "iTXt") {
+      const data = readBytes(bytes, dataStart, length);
+      const chunk = decodeItxtChunk(data);
+      if (chunk) {
+        chunks.push(chunk);
+      }
+    }
+
+    offset = dataEnd + 4;
+  }
+
+  return chunks;
+}
+
+function decodeItxtChunk(data: Uint8Array): PngTextChunk | null {
+  let cursor = 0;
+  const keywordEnd = indexOfZero(data, cursor);
+  if (keywordEnd < 0) {
+    return null;
+  }
+  const keyword = decodeText(data.slice(cursor, keywordEnd));
+  cursor = keywordEnd + 1;
+  if (cursor + 2 > data.length) {
+    return null;
+  }
+
+  const compressionFlag = data[cursor];
+  cursor += 1;
+  cursor += 1; // compression method
+
+  const languageEnd = indexOfZero(data, cursor);
+  if (languageEnd < 0) {
+    return null;
+  }
+  cursor = languageEnd + 1;
+
+  const translatedEnd = indexOfZero(data, cursor);
+  if (translatedEnd < 0) {
+    return null;
+  }
+  cursor = translatedEnd + 1;
+
+  const textData = data.slice(cursor);
+  if (compressionFlag !== 0) {
+    return null;
+  }
+
+  return {
+    keyword,
+    text: decodeText(textData),
+  };
+}
+
+function readUint32(bytes: Uint8Array, offset: number) {
+  return (
+    (bytes[offset] << 24) |
+    (bytes[offset + 1] << 16) |
+    (bytes[offset + 2] << 8) |
+    bytes[offset + 3]
+  ) >>> 0;
+}
+
+function readBytes(bytes: Uint8Array, offset: number, length: number) {
+  return bytes.slice(offset, offset + length);
+}
+
+function readAscii(bytes: Uint8Array, offset: number, length: number) {
+  return String.fromCharCode(...bytes.slice(offset, offset + length));
+}
+
+function decodeText(bytes: Uint8Array) {
+  try {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  } catch {
+    return String.fromCharCode(...bytes);
+  }
+}
+
+function indexOfZero(bytes: Uint8Array, start: number) {
+  for (let i = start; i < bytes.length; i += 1) {
+    if (bytes[i] === 0) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 export default App;

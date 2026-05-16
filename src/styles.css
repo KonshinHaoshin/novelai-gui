@@ -25,7 +25,7 @@
 
 body {
   margin: 0;
-  min-width: 1180px;
+  min-width: 1360px;
   min-height: 100vh;
   background: var(--bg);
 }
@@ -66,7 +66,7 @@ h2 {
 
 .studio-shell {
   display: grid;
-  grid-template-columns: 68px 330px minmax(430px, 1fr) 390px;
+  grid-template-columns: 64px 300px minmax(560px, 1fr) 330px;
   gap: 14px;
   min-height: 100vh;
   padding: 14px;
@@ -336,6 +336,13 @@ h2 {
   gap: 10px;
 }
 
+.prompt-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .card-head span,
 .section-meta {
   color: #9aa1ad;
@@ -371,6 +378,14 @@ textarea {
 .prompt-textarea.primary {
   flex: 1;
   min-height: 225px;
+}
+
+.hidden-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 input:focus,
@@ -670,11 +685,18 @@ select:focus {
   color: var(--muted);
   font-size: 12px;
   padding: 0 4px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.status-bar > span {
+  flex: 0 0 auto;
 }
 
 .status-pill {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   min-height: 22px;
   border-radius: 999px;
   padding: 0 9px;
@@ -692,6 +714,7 @@ select:focus {
 }
 
 .status-message {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
