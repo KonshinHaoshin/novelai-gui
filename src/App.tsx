@@ -26,7 +26,7 @@ import {
   ZoomIn,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent } from "react";
+import type { ChangeEvent } from "react";
 import appIcon from "../icon.png";
 
 type ImageAction = "generate" | "img2img" | "infill";
@@ -103,6 +103,9 @@ type AppSettings = {
   enableAppLogs: boolean;
   historyDisplayLimit: number;
   knowledgeServerUrl: string;
+  translationBaseUrl: string;
+  translationApiKey: string;
+  translationModel: string;
 };
 
 type AccountSummary = {
@@ -123,6 +126,8 @@ type ImportedImageMetadata = {
   negativePrompt?: string;
   characters?: CharacterPrompt[];
   useCharacterCoords?: boolean;
+  textChunkCount: number;
+  textChunkKeywords: string[];
   width?: number;
   height?: number;
   steps?: number;
@@ -135,7 +140,7 @@ type ImportedImageMetadata = {
   nSamples?: number;
 };
 
-type PromptEntryType = "style" | "action" | "character";
+type PromptEntryType = "style" | "scene" | "clothing";
 
 type PromptLibraryEntry = {
   id: number;
@@ -175,17 +180,22 @@ const DEFAULT_SETTINGS: AppSettings = {
   enableAppLogs: false,
   historyDisplayLimit: 8,
   knowledgeServerUrl: "http://127.0.0.1:8710",
+  translationBaseUrl: "",
+  translationApiKey: "",
+  translationModel: "",
 };
 
 const PROMPT_ENTRY_TYPES: Array<{ type: PromptEntryType; label: string }> = [
   { type: "style", label: "画风" },
-  { type: "action", label: "动作" },
-  { type: "character", label: "角色" },
+  { type: "scene", label: "场景" },
+  { type: "clothing", label: "服装" },
 ];
+
+const PROMPT_LIBRARY_MAX_RESULTS = 5000;
 
 const DEFAULT_REQUEST: ImageRequest = {
   prompt: "",
-  negativePrompt: "lowres, blurry, bad anatomy, watermark, text",
+  negativePrompt: "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, @_@, mismatched pupils, glowing eyes, bad anatomy, multiple views, building, city, blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, bad quality, very displeasing, chromatic aberration, logo, dated, signature, multiple views, gigantic breasts, nun, pov, pubic hair, wolf, animal, chibi, doll, milk, lowres, bad, error, fewer, extra, missing, worst quality, jpeg artifacts, bad quality, watermark, unfinished, displeasing, chromatic aberration, signature, extra digits, artistic error, username, scan, abstract, very displeasing, displeasing, lowres, lowres, bad, text, error, missing, extra, fewer, cropped, jpeg artifacts, worst quality, bad quality, watermark, displeasing, unfinished, chromatic aberration, scan, scan artifacts, photo, deformed, realism, disfigured, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, nsfw, :(mutated hands and fingers, one hand with more than 5 fingers, one hand with less than 5 fingers):0.8, text,",
   characters: [],
   useCharacterCoords: false,
   model: "nai-diffusion-4-5-full",
@@ -267,7 +277,12 @@ function App() {
   const [selectedPromptEntries, setSelectedPromptEntries] = useState<
     Partial<Record<PromptEntryType, PromptLibraryEntry>>
   >({});
+  const [selectedPromptBoxes, setSelectedPromptBoxes] = useState<Record<Exclude<PromptEntryType, "style">, PromptLibraryEntry[]>>({
+    scene: [],
+    clothing: [],
+  });
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [translatingField, setTranslatingField] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -316,33 +331,6 @@ function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    function onWindowPaste(event: globalThis.ClipboardEvent) {
-      if (activePanel !== "generate") {
-        return;
-      }
-
-      const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) =>
-        item.type.startsWith("image/"),
-      );
-      if (!imageItem) {
-        return;
-      }
-
-      const file = imageItem.getAsFile();
-      if (!file) {
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      void importPngFile(file);
-    }
-
-    window.addEventListener("paste", onWindowPaste, true);
-    return () => window.removeEventListener("paste", onWindowPaste, true);
-  }, [activePanel]);
 
   useEffect(() => {
     if (activePanel !== "promptLibrary") {
@@ -512,10 +500,10 @@ function App() {
     }
   }
 
-  function reuse(item: HistoryItem) {
+  function reuse(item: HistoryItem, imageIndex = 0) {
     setRequest(normalizeImageRequest(item.request));
     setActiveImages(item.images);
-    setSelectedImage(0);
+    setSelectedImage(Math.min(Math.max(imageIndex, 0), Math.max(item.images.length - 1, 0)));
     showNotice("info", "已恢复历史参数。");
   }
 
@@ -542,7 +530,7 @@ function App() {
     try {
       const params = new URLSearchParams({
         type: entryType,
-        limit: "24",
+        limit: String(PROMPT_LIBRARY_MAX_RESULTS),
       });
       if (query.trim()) {
         params.set("query", query.trim());
@@ -553,7 +541,7 @@ function App() {
         throw new Error(`素材库请求失败：HTTP ${response.status}`);
       }
 
-      const results = (await response.json()) as PromptLibraryEntry[];
+      const results = sortPromptLibraryResults((await response.json()) as PromptLibraryEntry[], entryType);
       setPromptLibraryResults(results);
       setPromptLibraryStatus(results.length > 0 ? `找到 ${results.length} 条结果。` : "没有匹配结果。");
     } catch (error) {
@@ -571,34 +559,57 @@ function App() {
       return;
     }
 
-    const currentSelection = selectedPromptEntries[entry.entry_type];
-    const isSameSelection = currentSelection?.slug === entry.slug;
+    if (entry.entry_type === "style") {
+      const currentSelection = selectedPromptEntries.style;
+      const isSameSelection = currentSelection?.slug === entry.slug;
 
-    setSelectedPromptEntries((current) => {
-      const next = { ...current };
-      if (isSameSelection) {
-        delete next[entry.entry_type];
-      } else {
-        next[entry.entry_type] = entry;
-      }
-      return next;
-    });
+      setSelectedPromptEntries((current) => {
+        const next = { ...current };
+        if (isSameSelection) {
+          delete next.style;
+        } else {
+          next.style = entry;
+        }
+        return next;
+      });
 
-    setRequest((current) => {
-      let nextPrompt = current.prompt;
-      if (currentSelection?.prompt) {
-        nextPrompt = removePromptText(nextPrompt, currentSelection.prompt);
-      }
-      if (!isSameSelection) {
-        nextPrompt = appendPromptText(nextPrompt, prompt);
-      }
+      setRequest((current) => {
+        let nextPrompt = current.prompt;
+        if (currentSelection?.prompt) {
+          nextPrompt = removePromptText(nextPrompt, currentSelection.prompt);
+        }
+        if (!isSameSelection) {
+          nextPrompt = appendPromptText(nextPrompt, prompt);
+        }
+        return {
+          ...current,
+          prompt: nextPrompt,
+        };
+      });
+
+      setPromptLibraryStatus(isSameSelection ? `已取消画风：${entry.title}` : `已应用画风：${entry.title}`);
+      return;
+    }
+
+    const type = entry.entry_type;
+    setSelectedPromptBoxes((current) => {
+      const exists = current[type].some((item) => item.slug === entry.slug);
       return {
         ...current,
-        prompt: nextPrompt,
+        [type]: exists
+          ? current[type].filter((item) => item.slug !== entry.slug)
+          : [...current[type], entry],
       };
     });
+    setPromptLibraryStatus(`已更新${promptEntryTypeLabel(type)}选择。`);
+  }
 
-    setPromptLibraryStatus(isSameSelection ? `已取消：${entry.title}` : `已选择：${entry.title}`);
+  function updateMainPromptFromSelection() {
+    setRequest((current) => ({
+      ...current,
+      prompt: buildPromptSelectionText(selectedPromptEntries.style, selectedPromptBoxes),
+    }));
+    setPromptLibraryStatus("已写入主 Prompt。");
   }
 
   function addCharacter() {
@@ -637,6 +648,90 @@ function App() {
     );
   }
 
+  async function translatePromptField(field: "prompt" | "negativePrompt") {
+    const text = request[field].trim();
+    if (!text) {
+      showNotice("info", "没有可翻译的提示词。");
+      return;
+    }
+
+    setTranslatingField(field);
+    try {
+      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive");
+      update(field, translated as ImageRequest[typeof field]);
+      showNotice("success", "提示词已翻译为英文。");
+    } catch (error) {
+      showNotice("error", String(error));
+    } finally {
+      setTranslatingField(null);
+    }
+  }
+
+  async function translateCharacterPrompt(id: string, field: "prompt" | "negativePrompt") {
+    const character = (request.characters ?? []).find((item) => item.id === id);
+    const text = character?.[field]?.trim() ?? "";
+    if (!text) {
+      showNotice("info", "没有可翻译的角色提示词。");
+      return;
+    }
+
+    const translationKey = `character:${id}:${field}`;
+    setTranslatingField(translationKey);
+    try {
+      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive");
+      updateCharacter(id, field, translated);
+      showNotice("success", "角色提示词已翻译为英文。");
+    } catch (error) {
+      showNotice("error", String(error));
+    } finally {
+      setTranslatingField(null);
+    }
+  }
+
+  async function translatePromptText(text: string, kind: "positive" | "negative") {
+    const endpoint = buildOpenAiChatCompletionsUrl(settings.translationBaseUrl);
+    if (!endpoint || !settings.translationApiKey.trim() || !settings.translationModel.trim()) {
+      throw new Error("请先在设置里配置翻译模型的网址、API Key 和模型名。");
+    }
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${settings.translationApiKey.trim()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: settings.translationModel.trim(),
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You translate Chinese image-generation prompts into concise English NovelAI tags. Keep existing English tags. Output only comma-separated prompt text, no explanation.",
+          },
+          {
+            role: "user",
+            content:
+              kind === "negative"
+                ? `Translate this negative prompt into English NovelAI tags:\n${text}`
+                : `Translate this prompt into English NovelAI tags:\n${text}`,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`翻译请求失败：HTTP ${response.status}`);
+    }
+
+    const responseText = await response.text();
+    const translated = parseOpenAiChatResponseText(responseText);
+    if (!translated) {
+      throw new Error("翻译模型没有返回有效文本。");
+    }
+    return translated.replace(/^["'`]+|["'`]+$/g, "").trim();
+  }
+
   function clearHistory() {
     setHistory([]);
     setActiveImages([]);
@@ -663,61 +758,59 @@ function App() {
     return `账号状态：Tier ${tier}，点数 ${points}，订阅 ${active}。`;
   }
 
+  function hasNovelAiMetadata(imported: ImportedImageMetadata) {
+    return Boolean(imported.prompt || imported.negativePrompt || (imported.characters ?? []).length > 0);
+  }
+
+  function applyImportedMetadata(imported: ImportedImageMetadata, fileName: string) {
+    setRequest((current) => ({
+      ...current,
+      prompt: imported.prompt ?? current.prompt,
+      negativePrompt: imported.negativePrompt ?? current.negativePrompt,
+      characters: imported.characters ?? current.characters,
+      useCharacterCoords: imported.useCharacterCoords ?? current.useCharacterCoords,
+      width: imported.width ?? current.width,
+      height: imported.height ?? current.height,
+      steps: imported.steps ?? current.steps,
+      scale: imported.scale ?? current.scale,
+      cfgRescale: imported.cfgRescale ?? current.cfgRescale,
+      seed: imported.seed ?? current.seed,
+      sampler: imported.sampler ?? current.sampler,
+      noiseSchedule: imported.noiseSchedule ?? current.noiseSchedule,
+      model: imported.model ?? current.model,
+      nSamples: imported.nSamples ?? current.nSamples,
+    }));
+    if ((imported.characters ?? []).length > 0) {
+      setCharacterOpen(true);
+    }
+    showNotice("success", "已从 PNG 元数据导入 prompt 和生成参数。");
+    writeAppLog("success", "png-import", `已导入 ${fileName} 的 PNG 元数据。`);
+  }
+
+  function reportMissingPngMetadata(file: File, imported: ImportedImageMetadata) {
+    const message = `PNG 中没有识别到 NovelAI prompt。文本块：${imported.textChunkKeywords.join(", ") || "无"}。`;
+    showNotice("info", message);
+    writeAppLog(
+      "warning",
+      "png-import",
+      `${file.name} 没有识别到 NovelAI prompt。text_chunks=${imported.textChunkCount} keywords=${imported.textChunkKeywords.join("|")}`,
+    );
+  }
+
   async function importPngFile(file: File) {
     try {
       const imported = parseNovelAiPngMetadata(await file.arrayBuffer());
-      if (!imported.prompt && !imported.negativePrompt && (imported.characters ?? []).length === 0) {
-        showNotice("info", "PNG 中没有识别到 NovelAI prompt。");
-        writeAppLog("warning", "png-import", `${file.name} 没有识别到 NovelAI prompt。`);
+      if (!hasNovelAiMetadata(imported)) {
+        reportMissingPngMetadata(file, imported);
         return;
       }
 
-      setRequest((current) => ({
-        ...current,
-        prompt: imported.prompt ?? current.prompt,
-        negativePrompt: imported.negativePrompt ?? current.negativePrompt,
-        characters: imported.characters ?? current.characters,
-        useCharacterCoords: imported.useCharacterCoords ?? current.useCharacterCoords,
-        width: imported.width ?? current.width,
-        height: imported.height ?? current.height,
-        steps: imported.steps ?? current.steps,
-        scale: imported.scale ?? current.scale,
-        cfgRescale: imported.cfgRescale ?? current.cfgRescale,
-        seed: imported.seed ?? current.seed,
-        sampler: imported.sampler ?? current.sampler,
-        noiseSchedule: imported.noiseSchedule ?? current.noiseSchedule,
-        model: imported.model ?? current.model,
-        nSamples: imported.nSamples ?? current.nSamples,
-      }));
-      if ((imported.characters ?? []).length > 0) {
-        setCharacterOpen(true);
-      }
-      showNotice("success", "已从 PNG 元数据导入 prompt 和生成参数。");
-      writeAppLog("success", "png-import", `已导入 ${file.name} 的 PNG 元数据。`);
+      applyImportedMetadata(imported, file.name);
     } catch (error) {
       const message = `解析 PNG 元数据失败：${String(error)}`;
       showNotice("error", message);
       writeAppLog("error", "png-import", message);
     }
-  }
-
-  async function handlePaste(event: ClipboardEvent<HTMLElement>) {
-    if (activePanel !== "generate") {
-      return;
-    }
-
-    const imageItem = Array.from(event.clipboardData.items).find((item) => item.type.startsWith("image/"));
-    if (!imageItem) {
-      return;
-    }
-
-    const file = imageItem.getAsFile();
-    if (!file) {
-      return;
-    }
-
-    event.preventDefault();
-    await importPngFile(file);
   }
 
   async function handleImportInput(event: ChangeEvent<HTMLInputElement>) {
@@ -795,11 +888,12 @@ function App() {
             <div className="prompt-actions">
               <button
                 className="ghost-button"
-                onClick={() => importInputRef.current?.click()}
+                disabled={translatingField !== null || !request.prompt.trim()}
+                onClick={() => void translatePromptField("prompt")}
                 type="button"
               >
-                <Upload aria-hidden="true" />
-                从图片导入
+                {translatingField === "prompt" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
+                翻译
               </button>
               <span>{request.prompt.length}</span>
             </div>
@@ -819,7 +913,18 @@ function App() {
               <h2>负向提示词</h2>
               <p>可选，排除不想要的内容</p>
             </div>
-            <span>{request.negativePrompt.length}</span>
+            <div className="prompt-actions">
+              <button
+                className="ghost-button"
+                disabled={translatingField !== null || !request.negativePrompt.trim()}
+                onClick={() => void translatePromptField("negativePrompt")}
+                type="button"
+              >
+                {translatingField === "negativePrompt" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
+                翻译
+              </button>
+              <span>{request.negativePrompt.length}</span>
+            </div>
           </div>
           <textarea
             className="prompt-textarea"
@@ -829,44 +934,6 @@ function App() {
           />
         </section>
 
-        <section className={historyOpen ? "history-card open" : "history-card"}>
-          <button className="section-toggle" onClick={() => setHistoryOpen((open) => !open)} type="button">
-            <span>
-              <History aria-hidden="true" />
-              历史记录
-            </span>
-            {history.length > 0 ? (
-              <span className="section-meta">
-                {visibleHistory.length}/{history.length}
-              </span>
-            ) : null}
-            <ChevronDown className={historyOpen ? "open" : ""} aria-hidden="true" />
-          </button>
-          {historyOpen ? (
-            history.length === 0 ? (
-              <div className="mini-empty">
-                <History aria-hidden="true" />
-                <strong>暂无历史</strong>
-                <span>生成后的记录会出现在这里。</span>
-              </div>
-            ) : (
-              <>
-              <button className="danger-button" onClick={clearHistory} type="button">
-                <Eraser aria-hidden="true" />
-                清除历史记录
-              </button>
-              <div className="history-list">
-                {visibleHistory.map((item) => (
-                  <button className="history-item" key={item.id} onClick={() => reuse(item)} type="button">
-                    <span>{new Date(item.createdAt).toLocaleString()}</span>
-                    <strong>{item.request.prompt || "未命名提示词"}</strong>
-                  </button>
-                ))}
-              </div>
-              </>
-            )
-          ) : null}
-        </section>
       </aside>
 
       <section className="canvas-stage" aria-label="Generated images">
@@ -876,6 +943,10 @@ function App() {
             <span>{currentImage ? `${currentImage.fileName} · ${formatBytes(currentImage.byteLen)}` : "等待生成结果"}</span>
           </div>
           <div className="toolbar-actions">
+            <button className="ghost-button" onClick={() => importInputRef.current?.click()} type="button">
+              <Upload aria-hidden="true" />
+              从图片导入
+            </button>
             <button className="ghost-button" onClick={() => refreshAccountStatus()} disabled={isRefreshingAccount || !hasToken} type="button">
               <RefreshCw className={isRefreshingAccount ? "spin" : ""} aria-hidden="true" />
               刷新
@@ -948,29 +1019,51 @@ function App() {
           </footer>
         </section>
 
-        <footer className="result-strip">
-          {activeImages.length === 0 ? (
-            <div className="thumb-placeholder">
-              <ImagePlus aria-hidden="true" />
-              <span>生成缩略图</span>
-            </div>
-          ) : (
-            activeImages.map((image, index) => (
-              <button
-                className={selectedImage === index ? "thumb active" : "thumb"}
-                key={`${image.fileName}-${index}`}
-                onClick={() => setSelectedImage(index)}
-                type="button"
-              >
-                <img src={`data:${image.mimeType};base64,${image.base64}`} alt="" />
-              </button>
-            ))
-          )}
-          <button className="more-tile" onClick={generate} disabled={!canGenerate} type="button">
-            <Sparkles aria-hidden="true" />
-            生成更多
+        <section className={historyOpen ? "history-card stage-history-card open" : "history-card stage-history-card"}>
+          <button className="section-toggle" onClick={() => setHistoryOpen((open) => !open)} type="button">
+            <span>
+              <History aria-hidden="true" />
+              历史记录
+            </span>
+            {history.length > 0 ? (
+              <span className="section-meta">
+                {visibleHistory.length}/{history.length}
+              </span>
+            ) : null}
+            <ChevronDown className={historyOpen ? "open" : ""} aria-hidden="true" />
           </button>
-        </footer>
+          {historyOpen ? (
+            history.length === 0 ? (
+              <div className="mini-empty history-empty-inline">
+                <History aria-hidden="true" />
+                <strong>暂无历史</strong>
+                <span>生成后的图片会出现在这里。</span>
+              </div>
+            ) : (
+              <div className="history-strip-wrap">
+                <div className="history-list image-only">
+                  {visibleHistory.flatMap((item) =>
+                    item.images.map((image, imageIndex) => (
+                      <button
+                        className={currentImage?.base64 === image.base64 ? "history-thumb active" : "history-thumb"}
+                        key={`${item.id}-${image.fileName}-${imageIndex}`}
+                        onClick={() => reuse(item, imageIndex)}
+                        title={new Date(item.createdAt).toLocaleString()}
+                        type="button"
+                      >
+                        <img src={`data:${image.mimeType};base64,${image.base64}`} alt="" />
+                      </button>
+                    )),
+                  )}
+                </div>
+                <button className="danger-button" onClick={clearHistory} type="button">
+                  <Eraser aria-hidden="true" />
+                  清除
+                </button>
+              </div>
+            )
+          ) : null}
+        </section>
 
         <div className="status-bar">
           <span className={isGenerating ? "status-pill busy" : "status-pill ok"}>{isGenerating ? "生成中" : "就绪"}</span>
@@ -1060,7 +1153,17 @@ function App() {
                           </button>
                         </div>
                         <label className="field">
-                          <span>角色提示词</span>
+                          <span className="field-label-row">
+                            角色提示词
+                            <button
+                              className="text-button"
+                              disabled={translatingField !== null || !character.prompt.trim()}
+                              onClick={() => void translateCharacterPrompt(character.id, "prompt")}
+                              type="button"
+                            >
+                              {translatingField === `character:${character.id}:prompt` ? "翻译中" : "翻译"}
+                            </button>
+                          </span>
                           <textarea
                             value={character.prompt}
                             onChange={(event) => updateCharacter(character.id, "prompt", event.target.value)}
@@ -1069,7 +1172,17 @@ function App() {
                           />
                         </label>
                         <label className="field">
-                          <span>角色负向提示词</span>
+                          <span className="field-label-row">
+                            角色负向提示词
+                            <button
+                              className="text-button"
+                              disabled={translatingField !== null || !character.negativePrompt.trim()}
+                              onClick={() => void translateCharacterPrompt(character.id, "negativePrompt")}
+                              type="button"
+                            >
+                              {translatingField === `character:${character.id}:negativePrompt` ? "翻译中" : "翻译"}
+                            </button>
+                          </span>
                           <textarea
                             value={character.negativePrompt}
                             onChange={(event) => updateCharacter(character.id, "negativePrompt", event.target.value)}
@@ -1204,7 +1317,7 @@ function App() {
             <div>
               <p className="eyebrow">Local Library</p>
               <h2>Prompt 助手</h2>
-              <span>从本地素材库选择画风、动作和角色；同类型再次选择会替换当前项。</span>
+              <span>画风单选替换，场景和服装会累积到下方已选框。</span>
             </div>
           </header>
 
@@ -1251,17 +1364,15 @@ function App() {
             {promptLibraryStatus ? <div className="prompt-library-status">{promptLibraryStatus}</div> : null}
 
             <div className="prompt-library-selection">
-              {PROMPT_ENTRY_TYPES.map((item) => (
-                <span key={item.type}>
-                  {item.label}：{selectedPromptEntries[item.type]?.title ?? "未选择"}
-                </span>
-              ))}
+              <span>画风：{selectedPromptEntries.style?.title ?? "未选择"}</span>
+              <span>场景：{selectedPromptBoxes.scene.length > 0 ? String(selectedPromptBoxes.scene.length) + " 项" : "未选择"}</span>
+              <span>服装：{selectedPromptBoxes.clothing.length > 0 ? String(selectedPromptBoxes.clothing.length) + " 项" : "未选择"}</span>
             </div>
 
             <div className="prompt-library-results">
               {promptLibraryResults.map((entry) => (
                 <button
-                  className={selectedPromptEntries[entry.entry_type]?.slug === entry.slug ? "prompt-library-item active" : "prompt-library-item"}
+                  className={isPromptEntrySelected(entry, selectedPromptEntries, selectedPromptBoxes) ? "prompt-library-item active" : "prompt-library-item"}
                   key={entry.slug}
                   onClick={() => togglePromptEntry(entry)}
                   type="button"
@@ -1272,6 +1383,16 @@ function App() {
                   <em>{entry.prompt}</em>
                 </button>
               ))}
+            </div>
+
+            <div className="prompt-library-output">
+              <label className="field">
+                <span>已选素材</span>
+                <textarea readOnly rows={6} value={buildPromptSelectionText(selectedPromptEntries.style, selectedPromptBoxes)} />
+              </label>
+              <button className="ghost-button wide-button" onClick={() => updateMainPromptFromSelection()} type="button">
+                写入主 Prompt
+              </button>
             </div>
           </section>
 
@@ -1374,6 +1495,40 @@ function App() {
                 </label>
                 <NumberField label="UC 预设" value={request.ucPreset} min={0} max={5} onChange={(value) => update("ucPreset", value)} />
                 <NumberField label="参数版本" value={request.paramsVersion} min={1} max={4} onChange={(value) => update("paramsVersion", value)} />
+              </div>
+            </section>
+
+            <section className="settings-panel wide">
+              <div className="section-head">
+                <WandSparkles aria-hidden="true" />
+                <h2>AI 翻译</h2>
+              </div>
+              <div className="settings-stack">
+                <label className="field">
+                  <span>OpenAI 兼容接口地址</span>
+                  <input
+                    value={settings.translationBaseUrl}
+                    onChange={(event) => updateSetting("translationBaseUrl", event.target.value)}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </label>
+                <label className="field">
+                  <span>API Key</span>
+                  <input
+                    value={settings.translationApiKey}
+                    onChange={(event) => updateSetting("translationApiKey", event.target.value)}
+                    placeholder="sk-..."
+                    type="password"
+                  />
+                </label>
+                <label className="field">
+                  <span>模型</span>
+                  <input
+                    value={settings.translationModel}
+                    onChange={(event) => updateSetting("translationModel", event.target.value)}
+                    placeholder="gpt-4o-mini 或其他兼容模型"
+                  />
+                </label>
               </div>
             </section>
 
@@ -1492,10 +1647,108 @@ function loadSettings(): AppSettings {
         parsed.historyDisplayLimit ?? DEFAULT_SETTINGS.historyDisplayLimit,
       ),
       knowledgeServerUrl: parsed.knowledgeServerUrl ?? DEFAULT_SETTINGS.knowledgeServerUrl,
+      translationBaseUrl: parsed.translationBaseUrl ?? DEFAULT_SETTINGS.translationBaseUrl,
+      translationApiKey: parsed.translationApiKey ?? DEFAULT_SETTINGS.translationApiKey,
+      translationModel: parsed.translationModel ?? DEFAULT_SETTINGS.translationModel,
     };
   } catch {
     return DEFAULT_SETTINGS;
   }
+}
+
+function buildOpenAiChatCompletionsUrl(baseUrl: string) {
+  const normalized = normalizeServerUrl(baseUrl);
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.endsWith("/chat/completions")) {
+    return normalized;
+  }
+  if (normalized.endsWith("/v1")) {
+    return `${normalized}/chat/completions`;
+  }
+  return `${normalized}/v1/chat/completions`;
+}
+
+function parseOpenAiChatResponseText(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith("{")) {
+    try {
+      return extractOpenAiChoiceText(JSON.parse(trimmed));
+    } catch {
+      throw new Error("翻译接口返回了非 OpenAI JSON/SSE 格式。");
+    }
+  }
+
+  const parts: string[] = [];
+  let sawDataLine = false;
+
+  for (const rawLine of trimmed.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(":")) {
+      continue;
+    }
+
+    if (!line.startsWith("data:")) {
+      continue;
+    }
+
+    sawDataLine = true;
+    const payload = line.slice("data:".length).trim();
+    if (!payload || payload === "[DONE]") {
+      continue;
+    }
+
+    try {
+      const content = extractOpenAiChoiceText(JSON.parse(payload));
+      if (content) {
+        parts.push(content);
+      }
+    } catch {
+      throw new Error("翻译接口返回了非 OpenAI JSON/SSE 格式。");
+    }
+  }
+
+  if (!sawDataLine && trimmed.startsWith("[")) {
+    throw new Error("翻译接口返回了非 OpenAI JSON/SSE 格式。");
+  }
+
+  return parts.join("").trim() || null;
+}
+
+function extractOpenAiChoiceText(value: unknown) {
+  if (!isRecord(value) || !Array.isArray(value.choices)) {
+    return null;
+  }
+
+  const parts: string[] = [];
+  for (const choice of value.choices) {
+    if (!isRecord(choice)) {
+      continue;
+    }
+
+    const messageContent = isRecord(choice.message) ? choice.message.content : undefined;
+    const deltaContent = isRecord(choice.delta) ? choice.delta.content : undefined;
+    const text = choice.text;
+
+    if (typeof messageContent === "string") {
+      parts.push(messageContent);
+    } else if (typeof deltaContent === "string") {
+      parts.push(deltaContent);
+    } else if (typeof text === "string") {
+      parts.push(text);
+    }
+  }
+
+  return parts.join("").trim() || null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function normalizeServerUrl(value: string) {
@@ -1545,17 +1798,57 @@ function promptEntryTypeLabel(type: PromptEntryType) {
     return "画风";
   }
 
-  if (type === "action") {
-    return "动作";
-  }
-
-  return "角色";
+  return type === "scene" ? "场景" : "服装";
 }
 
 function getPromptEntryImages(entry: PromptLibraryEntry) {
   return (entry.examples ?? [])
     .filter((example) => example.kind === "image" && example.url)
     .slice(0, 3);
+}
+
+function sortPromptLibraryResults(entries: PromptLibraryEntry[], type: PromptEntryType) {
+  if (type !== "style") {
+    return entries;
+  }
+
+  return [...entries].sort((left, right) => {
+    const leftImages = getPromptEntryImages(left).length;
+    const rightImages = getPromptEntryImages(right).length;
+    return rightImages - leftImages;
+  });
+}
+
+function isPromptEntrySelected(
+  entry: PromptLibraryEntry,
+  selectedStyle: Partial<Record<PromptEntryType, PromptLibraryEntry>>,
+  selectedBoxes: Record<Exclude<PromptEntryType, "style">, PromptLibraryEntry[]>,
+) {
+  if (entry.entry_type === "style") {
+    return selectedStyle.style?.slug === entry.slug;
+  }
+  return selectedBoxes[entry.entry_type].some((item) => item.slug === entry.slug);
+}
+
+function buildPromptSelectionText(
+  styleEntry: PromptLibraryEntry | undefined,
+  selectedBoxes: Record<Exclude<PromptEntryType, "style">, PromptLibraryEntry[]>,
+) {
+  const parts: string[] = [];
+  if (styleEntry?.prompt.trim()) {
+    parts.push(styleEntry.prompt.trim());
+  }
+  for (const item of selectedBoxes.scene) {
+    if (item.prompt.trim()) {
+      parts.push(item.prompt.trim());
+    }
+  }
+  for (const item of selectedBoxes.clothing) {
+    if (item.prompt.trim()) {
+      parts.push(item.prompt.trim());
+    }
+  }
+  return parts.join(", ");
 }
 
 function isTauriRuntime() {
@@ -1975,6 +2268,8 @@ function parseNovelAiPngMetadata(buffer: ArrayBuffer): ImportedImageMetadata {
     negativePrompt: extractPromptText(negativePrompt),
     characters,
     useCharacterCoords: characters.length > 0 ? (useCharacterCoords ?? hasCharacterCenters(characters)) : undefined,
+    textChunkCount: chunks.length,
+    textChunkKeywords: chunks.map((chunk) => chunk.keyword),
     width,
     height,
     steps,
