@@ -11,7 +11,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SERVICE_NAME: &str = "novelai-gui";
 const ACCOUNT_NAME: &str = "novelai-api-token";
 const GENERATE_IMAGE_URL: &str = "https://image.novelai.net/ai/generate-image";
+const AUGMENT_IMAGE_URL: &str = "https://image.novelai.net/ai/augment-image";
+const ENCODE_VIBE_URL: &str = "https://image.novelai.net/ai/encode-vibe";
+const SUGGEST_TAGS_URL: &str = "https://image.novelai.net/ai/generate-image/suggest-tags";
+const UPSCALE_IMAGE_URL: &str = "https://api.novelai.net/ai/upscale";
 const USER_DATA_URL: &str = "https://api.novelai.net/user/data";
+const USER_INFORMATION_URL: &str = "https://api.novelai.net/user/information";
+const USER_SUBSCRIPTION_URL: &str = "https://api.novelai.net/user/subscription";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +52,34 @@ pub struct ImageGenerateRequest {
     pub prefer_brownian: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub source_image: Option<String>,
+    #[serde(default)]
+    pub mask_image: Option<String>,
+    #[serde(default)]
+    pub strength: Option<f32>,
+    #[serde(default)]
+    pub noise: Option<f32>,
+    #[serde(default)]
+    pub extra_noise_seed: Option<u64>,
+    #[serde(default)]
+    pub color_correct: bool,
+    #[serde(default)]
+    pub reference_image: Option<String>,
+    #[serde(default)]
+    pub reference_strength: Option<f32>,
+    #[serde(default)]
+    pub reference_information_extracted: Option<f32>,
+    #[serde(default)]
+    pub director_reference_image: Option<String>,
+    #[serde(default)]
+    pub director_reference_prompt: Option<String>,
+    #[serde(default)]
+    pub director_reference_strength: Option<f32>,
+    #[serde(default)]
+    pub director_reference_secondary_strength: Option<f32>,
+    #[serde(default)]
+    pub director_reference_information_extracted: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +112,34 @@ pub struct GeneratedImage {
 pub struct GenerateImageResponse {
     pub content_type: String,
     pub images: Vec<GeneratedImage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpscaleImageRequest {
+    pub image: String,
+    pub width: u32,
+    pub height: u32,
+    pub scale: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AugmentImageRequest {
+    pub image: String,
+    pub prompt: String,
+    pub width: u32,
+    pub height: u32,
+    pub req_type: String,
+    pub defry: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodeVibeRequest {
+    pub image: String,
+    pub model: String,
+    pub information_extracted: f32,
 }
 
 #[tauri::command]
@@ -173,6 +235,56 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
     if let Some(value) = request.skip_cfg_above_sigma {
         parameters["skip_cfg_above_sigma"] = serde_json::json!(value);
     }
+    if let Some(image) = request.source_image.as_deref().filter(|value| !value.trim().is_empty()) {
+        parameters["image"] = serde_json::json!(image);
+    }
+    if let Some(mask) = request.mask_image.as_deref().filter(|value| !value.trim().is_empty()) {
+        parameters["mask"] = serde_json::json!(mask);
+    }
+    if let Some(value) = request.strength {
+        parameters["strength"] = serde_json::json!(value);
+    }
+    if let Some(value) = request.noise {
+        parameters["noise"] = serde_json::json!(value);
+    }
+    if let Some(value) = request.extra_noise_seed {
+        parameters["extra_noise_seed"] = serde_json::json!(value);
+    }
+    if request.action == "img2img" || request.action == "infill" {
+        parameters["color_correct"] = serde_json::json!(request.color_correct);
+    }
+    if let Some(image) = request.reference_image.as_deref().filter(|value| !value.trim().is_empty()) {
+        parameters["reference_image"] = serde_json::json!(image);
+        parameters["reference_strength"] = serde_json::json!(request.reference_strength.unwrap_or(0.6));
+        parameters["reference_information_extracted"] =
+            serde_json::json!(request.reference_information_extracted.unwrap_or(0.6));
+    }
+    if let Some(image) = request
+        .director_reference_image
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let description = request
+            .director_reference_prompt
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&request.prompt);
+        parameters["director_reference_images"] = serde_json::json!([image]);
+        parameters["director_reference_descriptions"] = serde_json::json!([{
+            "caption": {
+                "base_caption": description,
+                "char_captions": []
+            },
+            "use_coords": false,
+            "use_order": true
+        }]);
+        parameters["director_reference_strength_values"] =
+            serde_json::json!([request.director_reference_strength.unwrap_or(0.6)]);
+        parameters["director_reference_secondary_strength_values"] =
+            serde_json::json!([request.director_reference_secondary_strength.unwrap_or(0.4)]);
+        parameters["director_reference_information_extracted"] =
+            serde_json::json!([request.director_reference_information_extracted.unwrap_or(0.6)]);
+    }
 
     let payload = serde_json::json!({
         "input": request.prompt,
@@ -213,13 +325,83 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
 async fn get_account_status() -> Result<serde_json::Value, String> {
     let token = read_token()?;
     let client = reqwest::Client::new();
+    let data = get_json(&client, &token, USER_DATA_URL).await?;
+    let information = get_json(&client, &token, USER_INFORMATION_URL).await.ok();
+    let subscription = get_json(&client, &token, USER_SUBSCRIPTION_URL).await.ok();
+
+    Ok(serde_json::json!({
+        "data": data,
+        "information": information,
+        "subscription": subscription
+    }))
+}
+
+#[tauri::command]
+async fn suggest_tags(model: String, prompt: String, lang: Option<String>) -> Result<serde_json::Value, String> {
+    let token = read_token()?;
+    let client = reqwest::Client::new();
     let response = client
-        .get(USER_DATA_URL)
+        .get(SUGGEST_TAGS_URL)
         .header(AUTHORIZATION, format!("Bearer {token}"))
+        .query(&[
+            ("model", model.as_str()),
+            ("prompt", prompt.as_str()),
+            ("lang", lang.as_deref().unwrap_or("en")),
+        ])
         .send()
         .await
         .map_err(to_error)?;
 
+    response_json(response).await
+}
+
+#[tauri::command]
+async fn upscale_image(request: UpscaleImageRequest) -> Result<GenerateImageResponse, String> {
+    if request.scale != 2 && request.scale != 4 {
+        return Err("Upscale scale must be 2 or 4".to_string());
+    }
+
+    let token = read_token()?;
+    let payload = serde_json::json!({
+        "image": request.image,
+        "width": request.width,
+        "height": request.height,
+        "scale": request.scale,
+    });
+    post_zip_like(UPSCALE_IMAGE_URL, &token, payload).await
+}
+
+#[tauri::command]
+async fn augment_image(request: AugmentImageRequest) -> Result<GenerateImageResponse, String> {
+    let token = read_token()?;
+    let payload = serde_json::json!({
+        "image": request.image,
+        "prompt": request.prompt,
+        "width": request.width,
+        "height": request.height,
+        "req_type": request.req_type,
+        "defry": request.defry,
+    });
+    post_zip_like(AUGMENT_IMAGE_URL, &token, payload).await
+}
+
+#[tauri::command]
+async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, String> {
+    let token = read_token()?;
+    let payload = serde_json::json!({
+        "image": request.image,
+        "model": request.model,
+        "information_extracted": request.information_extracted,
+        "crop_to_mask": false,
+    });
+    let client = reqwest::Client::new();
+    let response = client
+        .post(ENCODE_VIBE_URL)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(to_error)?;
     let status = response.status();
     let body = response.bytes().await.map_err(to_error)?.to_vec();
 
@@ -227,7 +409,7 @@ async fn get_account_status() -> Result<serde_json::Value, String> {
         return Err(format_api_error(status.as_u16(), &body));
     }
 
-    serde_json::from_slice(&body).map_err(to_error)
+    Ok(BASE64.encode(body))
 }
 
 #[tauri::command]
@@ -279,6 +461,61 @@ fn read_token() -> Result<String, String> {
         Ok(_) | Err(keyring::Error::NoEntry) => Err("API Token is not configured".to_string()),
         Err(err) => Err(to_error(err)),
     }
+}
+
+async fn get_json(client: &reqwest::Client, token: &str, url: &str) -> Result<serde_json::Value, String> {
+    let response = client
+        .get(url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(to_error)?;
+
+    response_json(response).await
+}
+
+async fn response_json(response: reqwest::Response) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response.bytes().await.map_err(to_error)?.to_vec();
+
+    if !status.is_success() {
+        return Err(format_api_error(status.as_u16(), &body));
+    }
+
+    serde_json::from_slice(&body).map_err(to_error)
+}
+
+async fn post_zip_like(
+    url: &str,
+    token: &str,
+    payload: serde_json::Value,
+) -> Result<GenerateImageResponse, String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(to_error)?;
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let body = response.bytes().await.map_err(to_error)?.to_vec();
+
+    if !status.is_success() {
+        return Err(format_api_error(status.as_u16(), &body));
+    }
+
+    Ok(GenerateImageResponse {
+        content_type: content_type.clone(),
+        images: decode_generated_images(&content_type, body)?,
+    })
 }
 
 fn build_character_captions(characters: &[CharacterPrompt]) -> Vec<CharacterCaptionPayload> {
@@ -479,6 +716,10 @@ pub fn run() {
             save_api_token,
             get_account_status,
             generate_image,
+            suggest_tags,
+            upscale_image,
+            augment_image,
+            encode_vibe,
             save_generated_image,
             append_app_log
         ])

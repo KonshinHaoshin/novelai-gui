@@ -58,6 +58,21 @@ type ImageRequest = {
   skipCfgAboveSigma?: number;
   deliberateEulerAncestralBug: boolean;
   preferBrownian: boolean;
+  sourceImage?: ImageAsset;
+  maskImage?: ImageAsset;
+  strength: number;
+  noise: number;
+  extraNoiseSeed?: number;
+  colorCorrect: boolean;
+  vibeSourceImage?: ImageAsset;
+  referenceImage?: string;
+  referenceStrength: number;
+  referenceInformationExtracted: number;
+  directorReferenceImage?: ImageAsset;
+  directorReferencePrompt: string;
+  directorReferenceStrength: number;
+  directorReferenceSecondaryStrength: number;
+  directorReferenceInformationExtracted: number;
 };
 
 type CharacterPrompt = {
@@ -72,6 +87,12 @@ type GeneratedImage = {
   fileName: string;
   mimeType: string;
   byteLen: number;
+  base64: string;
+};
+
+type ImageAsset = {
+  name: string;
+  mimeType: string;
   base64: string;
 };
 
@@ -98,6 +119,8 @@ type Notice = {
   message: string;
 };
 
+type TranslationDirection = "zh-to-en-tags" | "en-to-zh";
+
 type AppSettings = {
   showPayloadPreview: boolean;
   enableAppLogs: boolean;
@@ -115,6 +138,14 @@ type AccountSummary = {
   expiresAt?: number;
   raw: unknown;
 };
+
+type TagSuggestion = {
+  tag: string;
+  count?: number;
+  confidence?: number;
+};
+
+type DirectorToolType = "lineart" | "sketch" | "colorize" | "emotion" | "declutter";
 
 type PngTextChunk = {
   keyword: string;
@@ -192,6 +223,7 @@ const PROMPT_ENTRY_TYPES: Array<{ type: PromptEntryType; label: string }> = [
 ];
 
 const PROMPT_LIBRARY_MAX_RESULTS = 5000;
+const PROMPT_LIBRARY_PAGE_SIZE = 80;
 
 const DEFAULT_REQUEST: ImageRequest = {
   prompt: "",
@@ -217,6 +249,15 @@ const DEFAULT_REQUEST: ImageRequest = {
   smDyn: false,
   deliberateEulerAncestralBug: false,
   preferBrownian: true,
+  strength: 0.55,
+  noise: 0,
+  colorCorrect: true,
+  referenceStrength: 0.6,
+  referenceInformationExtracted: 0.6,
+  directorReferencePrompt: "",
+  directorReferenceStrength: 0.6,
+  directorReferenceSecondaryStrength: 0.4,
+  directorReferenceInformationExtracted: 0.6,
 };
 
 const MODELS = [
@@ -261,6 +302,7 @@ function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(true);
+  const [apiToolsOpen, setApiToolsOpen] = useState(true);
   const [characterOpen, setCharacterOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [activePanel, setActivePanel] = useState<"generate" | "promptLibrary" | "settings">("generate");
@@ -272,6 +314,7 @@ function App() {
   const [promptLibraryType, setPromptLibraryType] = useState<PromptEntryType>("style");
   const [promptLibraryQuery, setPromptLibraryQuery] = useState("");
   const [promptLibraryResults, setPromptLibraryResults] = useState<PromptLibraryEntry[]>([]);
+  const [promptLibraryVisibleCount, setPromptLibraryVisibleCount] = useState(PROMPT_LIBRARY_PAGE_SIZE);
   const [isSearchingPromptLibrary, setIsSearchingPromptLibrary] = useState(false);
   const [promptLibraryStatus, setPromptLibraryStatus] = useState<string | null>(null);
   const [selectedPromptEntries, setSelectedPromptEntries] = useState<
@@ -282,7 +325,18 @@ function App() {
     clothing: [],
   });
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceImageInputRef = useRef<HTMLInputElement | null>(null);
+  const maskImageInputRef = useRef<HTMLInputElement | null>(null);
+  const vibeImageInputRef = useRef<HTMLInputElement | null>(null);
+  const directorImageInputRef = useRef<HTMLInputElement | null>(null);
   const [translatingField, setTranslatingField] = useState<string | null>(null);
+  const [tagQuery, setTagQuery] = useState("");
+  const [tagSuggestions, setTagSuggestions] = useState<TagSuggestion[]>([]);
+  const [isSuggestingTags, setIsSuggestingTags] = useState(false);
+  const [isEncodingVibe, setIsEncodingVibe] = useState(false);
+  const [isToolRunning, setIsToolRunning] = useState(false);
+  const [upscaleScale, setUpscaleScale] = useState<2 | 4>(2);
+  const [directorToolType, setDirectorToolType] = useState<DirectorToolType>("lineart");
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -343,8 +397,14 @@ function App() {
   const currentImage = activeImages[selectedImage];
   const visibleHistory = history.slice(0, settings.historyDisplayLimit);
   const canGenerate = useMemo(
-    () => request.prompt.trim().length > 0 && hasToken && !isGenerating,
-    [hasToken, isGenerating, request.prompt],
+    () => {
+      const hasRequiredImage =
+        request.action === "generate" ||
+        (request.action === "img2img" && Boolean(request.sourceImage)) ||
+        (request.action === "infill" && Boolean(request.sourceImage && request.maskImage));
+      return request.prompt.trim().length > 0 && hasToken && !isGenerating && hasRequiredImage;
+    },
+    [hasToken, isGenerating, request.action, request.maskImage, request.prompt, request.sourceImage],
   );
 
   async function saveToken() {
@@ -412,7 +472,7 @@ function App() {
     writeAppLog("info", "generate", `开始生成：${request.model} · ${request.width}×${request.height} · ${request.action}`);
     const beforeAccount = await refreshAccountStatus(false);
     try {
-      const response = await invoke<GenerateImageResponse>("generate_image", { request });
+      const response = await invoke<GenerateImageResponse>("generate_image", { request: buildBackendImageRequest(request) });
       setActiveImages(response.images);
       setSelectedImage(0);
       setHistory((items) =>
@@ -500,6 +560,131 @@ function App() {
     }
   }
 
+  async function suggestPromptTags() {
+    if (!isTauriRuntime()) {
+      showNotice("info", "请在 Tauri 桌面窗口中请求 tag 建议。");
+      return;
+    }
+
+    const prompt = tagQuery.trim();
+    if (!prompt) {
+      showNotice("info", "先输入要补全的 tag。");
+      return;
+    }
+
+    setIsSuggestingTags(true);
+    try {
+      const response = await invoke<unknown>("suggest_tags", {
+        model: request.model,
+        prompt,
+        lang: "en",
+      });
+      const tags = extractTagSuggestions(response);
+      setTagSuggestions(tags);
+      showNotice(tags.length > 0 ? "success" : "info", tags.length > 0 ? `找到 ${tags.length} 个 tag 建议。` : "没有 tag 建议。");
+    } catch (error) {
+      showNotice("error", String(error));
+    } finally {
+      setIsSuggestingTags(false);
+    }
+  }
+
+  function applyTagSuggestion(tag: string) {
+    update("prompt", appendPromptText(request.prompt, tag));
+  }
+
+  async function encodeVibeTransfer() {
+    if (!isTauriRuntime()) {
+      showNotice("info", "请在 Tauri 桌面窗口中编码 Vibe。");
+      return;
+    }
+    if (!request.vibeSourceImage) {
+      showNotice("info", "先选择 Vibe 参考图。");
+      return;
+    }
+
+    setIsEncodingVibe(true);
+    try {
+      const encoded = await invoke<string>("encode_vibe", {
+        request: {
+          image: request.vibeSourceImage.base64,
+          model: request.model,
+          informationExtracted: request.referenceInformationExtracted,
+        },
+      });
+      update("referenceImage", encoded);
+      showNotice("success", "Vibe 已编码并写入生成参数。");
+    } catch (error) {
+      showNotice("error", String(error));
+    } finally {
+      setIsEncodingVibe(false);
+    }
+  }
+
+  async function upscaleCurrentImage() {
+    if (!isTauriRuntime()) {
+      showNotice("info", "请在 Tauri 桌面窗口中执行超分。");
+      return;
+    }
+    if (!currentImage) {
+      showNotice("info", "先选择一张生成结果。");
+      return;
+    }
+
+    setIsToolRunning(true);
+    try {
+      const response = await invoke<GenerateImageResponse>("upscale_image", {
+        request: {
+          image: currentImage.base64,
+          width: request.width,
+          height: request.height,
+          scale: upscaleScale,
+        },
+      });
+      setActiveImages(response.images);
+      setSelectedImage(0);
+      showNotice("success", `超分完成，收到 ${response.images.length} 张图。`);
+    } catch (error) {
+      showNotice("error", String(error));
+    } finally {
+      setIsToolRunning(false);
+    }
+  }
+
+  async function runDirectorTool() {
+    if (!isTauriRuntime()) {
+      showNotice("info", "请在 Tauri 桌面窗口中使用图像工具。");
+      return;
+    }
+
+    const image = request.directorReferenceImage ?? (currentImage ? generatedImageToAsset(currentImage) : undefined);
+    if (!image) {
+      showNotice("info", "先选择 Director 输入图，或先选中一张生成结果。");
+      return;
+    }
+
+    setIsToolRunning(true);
+    try {
+      const response = await invoke<GenerateImageResponse>("augment_image", {
+        request: {
+          image: image.base64,
+          prompt: request.directorReferencePrompt || request.prompt,
+          width: request.width,
+          height: request.height,
+          reqType: directorToolType,
+          defry: 0,
+        },
+      });
+      setActiveImages(response.images);
+      setSelectedImage(0);
+      showNotice("success", `Director Tool 完成，收到 ${response.images.length} 张图。`);
+    } catch (error) {
+      showNotice("error", String(error));
+    } finally {
+      setIsToolRunning(false);
+    }
+  }
+
   function reuse(item: HistoryItem, imageIndex = 0) {
     setRequest(normalizeImageRequest(item.request));
     setActiveImages(item.images);
@@ -543,6 +728,7 @@ function App() {
 
       const results = sortPromptLibraryResults((await response.json()) as PromptLibraryEntry[], entryType);
       setPromptLibraryResults(results);
+      setPromptLibraryVisibleCount(PROMPT_LIBRARY_PAGE_SIZE);
       setPromptLibraryStatus(results.length > 0 ? `找到 ${results.length} 条结果。` : "没有匹配结果。");
     } catch (error) {
       setPromptLibraryResults([]);
@@ -551,6 +737,8 @@ function App() {
       setIsSearchingPromptLibrary(false);
     }
   }
+
+  const visiblePromptLibraryResults = promptLibraryResults.slice(0, promptLibraryVisibleCount);
 
   function togglePromptEntry(entry: PromptLibraryEntry) {
     const prompt = entry.prompt.trim();
@@ -648,18 +836,19 @@ function App() {
     );
   }
 
-  async function translatePromptField(field: "prompt" | "negativePrompt") {
+  async function translatePromptField(field: "prompt" | "negativePrompt", direction: TranslationDirection) {
     const text = request[field].trim();
     if (!text) {
       showNotice("info", "没有可翻译的提示词。");
       return;
     }
 
-    setTranslatingField(field);
+    const translationKey = `${field}:${direction}`;
+    setTranslatingField(translationKey);
     try {
-      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive");
+      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive", direction);
       update(field, translated as ImageRequest[typeof field]);
-      showNotice("success", "提示词已翻译为英文。");
+      showNotice("success", direction === "zh-to-en-tags" ? "提示词已转为英文 tag。" : "提示词已翻译为中文。");
     } catch (error) {
       showNotice("error", String(error));
     } finally {
@@ -667,7 +856,7 @@ function App() {
     }
   }
 
-  async function translateCharacterPrompt(id: string, field: "prompt" | "negativePrompt") {
+  async function translateCharacterPrompt(id: string, field: "prompt" | "negativePrompt", direction: TranslationDirection) {
     const character = (request.characters ?? []).find((item) => item.id === id);
     const text = character?.[field]?.trim() ?? "";
     if (!text) {
@@ -675,12 +864,12 @@ function App() {
       return;
     }
 
-    const translationKey = `character:${id}:${field}`;
+    const translationKey = `character:${id}:${field}:${direction}`;
     setTranslatingField(translationKey);
     try {
-      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive");
+      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive", direction);
       updateCharacter(id, field, translated);
-      showNotice("success", "角色提示词已翻译为英文。");
+      showNotice("success", direction === "zh-to-en-tags" ? "角色提示词已转为英文 tag。" : "角色提示词已翻译为中文。");
     } catch (error) {
       showNotice("error", String(error));
     } finally {
@@ -688,7 +877,7 @@ function App() {
     }
   }
 
-  async function translatePromptText(text: string, kind: "positive" | "negative") {
+  async function translatePromptText(text: string, kind: "positive" | "negative", direction: TranslationDirection) {
     const endpoint = buildOpenAiChatCompletionsUrl(settings.translationBaseUrl);
     if (!endpoint || !settings.translationApiKey.trim() || !settings.translationModel.trim()) {
       throw new Error("请先在设置里配置翻译模型的网址、API Key 和模型名。");
@@ -706,15 +895,11 @@ function App() {
         messages: [
           {
             role: "system",
-            content:
-              "You translate Chinese image-generation prompts into concise English NovelAI tags. Keep existing English tags. Output only comma-separated prompt text, no explanation.",
+            content: buildTranslationSystemPrompt(direction, kind),
           },
           {
             role: "user",
-            content:
-              kind === "negative"
-                ? `Translate this negative prompt into English NovelAI tags:\n${text}`
-                : `Translate this prompt into English NovelAI tags:\n${text}`,
+            content: buildTranslationUserPrompt(text, direction, kind),
           },
         ],
       }),
@@ -821,6 +1006,23 @@ function App() {
     }
   }
 
+  async function handleAssetInput(
+    event: ChangeEvent<HTMLInputElement>,
+    key: "sourceImage" | "maskImage" | "vibeSourceImage" | "directorReferenceImage",
+  ) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    try {
+      update(key, await imageAssetFromFile(file));
+    } catch (error) {
+      showNotice("error", `读取图片失败：${String(error)}`);
+    }
+  }
+
   function showNotice(type: Notice["type"], message: string) {
     setNotice({ type, message });
   }
@@ -833,6 +1035,42 @@ function App() {
         aria-hidden="true"
         className="hidden-file-input"
         onChange={handleImportInput}
+        tabIndex={-1}
+        type="file"
+      />
+      <input
+        ref={sourceImageInputRef}
+        accept="image/*"
+        aria-hidden="true"
+        className="hidden-file-input"
+        onChange={(event) => void handleAssetInput(event, "sourceImage")}
+        tabIndex={-1}
+        type="file"
+      />
+      <input
+        ref={maskImageInputRef}
+        accept="image/*"
+        aria-hidden="true"
+        className="hidden-file-input"
+        onChange={(event) => void handleAssetInput(event, "maskImage")}
+        tabIndex={-1}
+        type="file"
+      />
+      <input
+        ref={vibeImageInputRef}
+        accept="image/*"
+        aria-hidden="true"
+        className="hidden-file-input"
+        onChange={(event) => void handleAssetInput(event, "vibeSourceImage")}
+        tabIndex={-1}
+        type="file"
+      />
+      <input
+        ref={directorImageInputRef}
+        accept="image/*"
+        aria-hidden="true"
+        className="hidden-file-input"
+        onChange={(event) => void handleAssetInput(event, "directorReferenceImage")}
         tabIndex={-1}
         type="file"
       />
@@ -889,11 +1127,20 @@ function App() {
               <button
                 className="ghost-button"
                 disabled={translatingField !== null || !request.prompt.trim()}
-                onClick={() => void translatePromptField("prompt")}
+                onClick={() => void translatePromptField("prompt", "zh-to-en-tags")}
                 type="button"
               >
-                {translatingField === "prompt" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
-                翻译
+                {translatingField === "prompt:zh-to-en-tags" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
+                中译英 Tag
+              </button>
+              <button
+                className="ghost-button"
+                disabled={translatingField !== null || !request.prompt.trim()}
+                onClick={() => void translatePromptField("prompt", "en-to-zh")}
+                type="button"
+              >
+                {translatingField === "prompt:en-to-zh" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
+                英译中
               </button>
               <span>{request.prompt.length}</span>
             </div>
@@ -917,11 +1164,20 @@ function App() {
               <button
                 className="ghost-button"
                 disabled={translatingField !== null || !request.negativePrompt.trim()}
-                onClick={() => void translatePromptField("negativePrompt")}
+                onClick={() => void translatePromptField("negativePrompt", "zh-to-en-tags")}
                 type="button"
               >
-                {translatingField === "negativePrompt" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
-                翻译
+                {translatingField === "negativePrompt:zh-to-en-tags" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
+                中译英 Tag
+              </button>
+              <button
+                className="ghost-button"
+                disabled={translatingField !== null || !request.negativePrompt.trim()}
+                onClick={() => void translatePromptField("negativePrompt", "en-to-zh")}
+                type="button"
+              >
+                {translatingField === "negativePrompt:en-to-zh" ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
+                英译中
               </button>
               <span>{request.negativePrompt.length}</span>
             </div>
@@ -1109,6 +1365,162 @@ function App() {
           </div>
         </section>
 
+        <section className="parameter-card">
+          <div className="section-head">
+            <ImagePlus aria-hidden="true" />
+            <h2>输入模式</h2>
+          </div>
+          <div className="preset-row">
+            {([
+              ["generate", "文生图"],
+              ["img2img", "图生图"],
+              ["infill", "局部重绘"],
+            ] as Array<[ImageAction, string]>).map(([action, label]) => (
+              <button
+                className={request.action === action ? "chip active" : "chip"}
+                key={action}
+                onClick={() => update("action", action)}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {request.action !== "generate" ? (
+            <div className="tool-stack">
+              <AssetPicker
+                asset={request.sourceImage}
+                label="输入图"
+                onClear={() => update("sourceImage", undefined)}
+                onPick={() => sourceImageInputRef.current?.click()}
+              />
+              {request.action === "infill" ? (
+                <AssetPicker
+                  asset={request.maskImage}
+                  label="遮罩图"
+                  onClear={() => update("maskImage", undefined)}
+                  onPick={() => maskImageInputRef.current?.click()}
+                />
+              ) : null}
+              <div className="field-grid">
+                <NumberField label="强度" value={request.strength} min={0} max={1} step={0.01} onChange={(value) => update("strength", clamp01(value))} />
+                <NumberField label="噪声" value={request.noise} min={0} max={1} step={0.01} onChange={(value) => update("noise", clamp01(value))} />
+              </div>
+              <div className="field-grid">
+                <OptionalNumberField label="额外噪声种子" value={request.extraNoiseSeed} min={0} max={4294967295} onChange={(value) => update("extraNoiseSeed", value)} />
+                <Toggle label="颜色校正" checked={request.colorCorrect} onChange={(value) => update("colorCorrect", value)} />
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        {false ? (
+        <section className="parameter-card">
+          <button className="section-toggle" onClick={() => setApiToolsOpen((open) => !open)} type="button">
+            <span>
+              <WandSparkles aria-hidden="true" />
+              API 工具
+            </span>
+            <ChevronDown className={apiToolsOpen ? "open" : ""} aria-hidden="true" />
+          </button>
+          {apiToolsOpen ? (
+            <div className="tool-stack">
+              <div className="tool-box">
+                <strong>Tag Suggestion</strong>
+                <div className="prompt-library-search compact-search">
+                  <input
+                    value={tagQuery}
+                    onChange={(event) => setTagQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void suggestPromptTags();
+                      }
+                    }}
+                    placeholder="输入半个 tag"
+                  />
+                  <button className="icon-button filled" onClick={() => void suggestPromptTags()} disabled={isSuggestingTags || !hasToken} title="建议 tag" type="button">
+                    {isSuggestingTags ? <Loader2 className="spin" aria-hidden="true" /> : <Search aria-hidden="true" />}
+                  </button>
+                </div>
+                {tagSuggestions.length > 0 ? (
+                  <div className="tag-suggestion-row">
+                    {tagSuggestions.map((item) => (
+                      <button className="tag-suggestion" key={item.tag} onClick={() => applyTagSuggestion(item.tag)} type="button">
+                        {item.tag}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="tool-box">
+                <strong>Vibe Transfer</strong>
+                <AssetPicker
+                  asset={request.vibeSourceImage}
+                  label="Vibe 图"
+                  onClear={() => {
+                    update("vibeSourceImage", undefined);
+                    update("referenceImage", undefined);
+                  }}
+                  onPick={() => vibeImageInputRef.current?.click()}
+                />
+                <div className="field-grid">
+                  <NumberField label="强度" value={request.referenceStrength} min={0} max={1} step={0.01} onChange={(value) => update("referenceStrength", clamp01(value))} />
+                  <NumberField label="提取量" value={request.referenceInformationExtracted} min={0} max={1} step={0.01} onChange={(value) => update("referenceInformationExtracted", clamp01(value))} />
+                </div>
+                <button className="ghost-button wide-button" onClick={() => void encodeVibeTransfer()} disabled={isEncodingVibe || !hasToken || !request.vibeSourceImage} type="button">
+                  {isEncodingVibe ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
+                  编码 Vibe
+                </button>
+              </div>
+
+              <div className="tool-box">
+                <strong>结果工具</strong>
+                <div className="preset-row two">
+                  {[2, 4].map((scale) => (
+                    <button className={upscaleScale === scale ? "chip active" : "chip"} key={scale} onClick={() => setUpscaleScale(scale as 2 | 4)} type="button">
+                      {scale}x
+                    </button>
+                  ))}
+                </div>
+                <button className="ghost-button wide-button" onClick={() => void upscaleCurrentImage()} disabled={isToolRunning || !hasToken || !currentImage} type="button">
+                  <Maximize2 aria-hidden="true" />
+                  超分当前图
+                </button>
+              </div>
+
+              <div className="tool-box">
+                <strong>Director Tools</strong>
+                <AssetPicker
+                  asset={request.directorReferenceImage}
+                  label="输入图"
+                  onClear={() => update("directorReferenceImage", undefined)}
+                  onPick={() => directorImageInputRef.current?.click()}
+                />
+                <label className="field">
+                  <span>工具类型</span>
+                  <select value={directorToolType} onChange={(event) => setDirectorToolType(event.target.value as DirectorToolType)}>
+                    <option value="lineart">lineart</option>
+                    <option value="sketch">sketch</option>
+                    <option value="colorize">colorize</option>
+                    <option value="emotion">emotion</option>
+                    <option value="declutter">declutter</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>工具 Prompt</span>
+                  <input value={request.directorReferencePrompt} onChange={(event) => update("directorReferencePrompt", event.target.value)} placeholder="留空则使用主 Prompt" />
+                </label>
+                <button className="ghost-button wide-button" onClick={() => void runDirectorTool()} disabled={isToolRunning || !hasToken || (!request.directorReferenceImage && !currentImage)} type="button">
+                  {isToolRunning ? <Loader2 className="spin" aria-hidden="true" /> : <Sparkles aria-hidden="true" />}
+                  执行工具
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </section>
+        ) : null}
+
         <section className="parameter-card character-card">
           <button className="section-toggle" onClick={() => setCharacterOpen((open) => !open)} type="button">
             <span>
@@ -1158,10 +1570,18 @@ function App() {
                             <button
                               className="text-button"
                               disabled={translatingField !== null || !character.prompt.trim()}
-                              onClick={() => void translateCharacterPrompt(character.id, "prompt")}
+                              onClick={() => void translateCharacterPrompt(character.id, "prompt", "zh-to-en-tags")}
                               type="button"
                             >
-                              {translatingField === `character:${character.id}:prompt` ? "翻译中" : "翻译"}
+                              {translatingField === `character:${character.id}:prompt:zh-to-en-tags` ? "翻译中" : "中译英 Tag"}
+                            </button>
+                            <button
+                              className="text-button"
+                              disabled={translatingField !== null || !character.prompt.trim()}
+                              onClick={() => void translateCharacterPrompt(character.id, "prompt", "en-to-zh")}
+                              type="button"
+                            >
+                              {translatingField === `character:${character.id}:prompt:en-to-zh` ? "翻译中" : "英译中"}
                             </button>
                           </span>
                           <textarea
@@ -1177,10 +1597,18 @@ function App() {
                             <button
                               className="text-button"
                               disabled={translatingField !== null || !character.negativePrompt.trim()}
-                              onClick={() => void translateCharacterPrompt(character.id, "negativePrompt")}
+                              onClick={() => void translateCharacterPrompt(character.id, "negativePrompt", "zh-to-en-tags")}
                               type="button"
                             >
-                              {translatingField === `character:${character.id}:negativePrompt` ? "翻译中" : "翻译"}
+                              {translatingField === `character:${character.id}:negativePrompt:zh-to-en-tags` ? "翻译中" : "中译英 Tag"}
+                            </button>
+                            <button
+                              className="text-button"
+                              disabled={translatingField !== null || !character.negativePrompt.trim()}
+                              onClick={() => void translateCharacterPrompt(character.id, "negativePrompt", "en-to-zh")}
+                              type="button"
+                            >
+                              {translatingField === `character:${character.id}:negativePrompt:en-to-zh` ? "翻译中" : "英译中"}
                             </button>
                           </span>
                           <textarea
@@ -1370,7 +1798,7 @@ function App() {
             </div>
 
             <div className="prompt-library-results">
-              {promptLibraryResults.map((entry) => (
+              {visiblePromptLibraryResults.map((entry) => (
                 <button
                   className={isPromptEntrySelected(entry, selectedPromptEntries, selectedPromptBoxes) ? "prompt-library-item active" : "prompt-library-item"}
                   key={entry.slug}
@@ -1384,6 +1812,16 @@ function App() {
                 </button>
               ))}
             </div>
+
+            {promptLibraryVisibleCount < promptLibraryResults.length ? (
+              <button
+                className="ghost-button wide-button"
+                onClick={() => setPromptLibraryVisibleCount((count) => Math.min(count + PROMPT_LIBRARY_PAGE_SIZE, promptLibraryResults.length))}
+                type="button"
+              >
+                加载更多（{promptLibraryVisibleCount}/{promptLibraryResults.length}）
+              </button>
+            ) : null}
 
             <div className="prompt-library-output">
               <label className="field">
@@ -1617,6 +2055,38 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
   );
 }
 
+function AssetPicker(props: {
+  label: string;
+  asset?: ImageAsset;
+  onPick: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="asset-picker">
+      <button className="asset-preview" onClick={props.onPick} type="button">
+        {props.asset ? (
+          <img src={`data:${props.asset.mimeType};base64,${props.asset.base64}`} alt="" />
+        ) : (
+          <ImagePlus aria-hidden="true" />
+        )}
+      </button>
+      <div>
+        <span>{props.label}</span>
+        <strong>{props.asset?.name ?? "未选择"}</strong>
+      </div>
+      {props.asset ? (
+        <button className="icon-button" onClick={props.onClear} title="清除图片" type="button">
+          <Eraser aria-hidden="true" />
+        </button>
+      ) : (
+        <button className="ghost-button" onClick={props.onPick} type="button">
+          选择
+        </button>
+      )}
+    </div>
+  );
+}
+
 function PromptEntryImages(props: { entry: PromptLibraryEntry }) {
   const images = getPromptEntryImages(props.entry);
   if (images.length === 0) {
@@ -1630,6 +2100,60 @@ function PromptEntryImages(props: { entry: PromptLibraryEntry }) {
       ))}
     </div>
   );
+}
+
+function buildTranslationSystemPrompt(direction: TranslationDirection, kind: "positive" | "negative") {
+  if (direction === "en-to-zh") {
+    return [
+      "你是图像生成 prompt 翻译器。",
+      "把英文 NovelAI / Stable Diffusion / WebUI 风格 tag 翻译成自然、简洁的中文说明。",
+      "保留专有名词、画师名、模型名和无法可靠翻译的英文 tag。",
+      "不要解释，不要加前后缀，只输出翻译后的中文文本。",
+    ].join("\n");
+  }
+
+  const examples =
+    kind === "negative"
+      ? [
+          "中文：不要低清晰度，手指错误，水印，文字，畸形身体",
+          "英文 tag：lowres, bad hands, extra fingers, missing fingers, watermark, text, bad anatomy, deformed body",
+          "中文：不要模糊、jpeg 噪点、糟糕质量、脸崩",
+          "英文 tag：blurry, jpeg artifacts, worst quality, bad quality, bad face, malformed face",
+        ]
+      : [
+          "中文：一个穿白色连衣裙的少女坐在黄昏的湖边，柔和光线，远处有城市灯光",
+          "英文 tag：1girl, white dress, sitting, lakeside, dusk, soft lighting, city lights, depth of field",
+          "中文：赛博朋克街道，下雨的夜晚，霓虹灯，角色回头看镜头",
+          "英文 tag：cyberpunk city, rainy night, neon lights, street, looking back, looking at viewer",
+          "中文：黑发红眼女仆，精致发饰，半身像，动漫风，高质量",
+          "英文 tag：1girl, black hair, red eyes, maid outfit, hair ornament, upper body, anime style, best quality",
+        ];
+
+  return [
+    "You are a NovelAI / Stable Diffusion / WebUI prompt optimizer and translator.",
+    "Task: translate Chinese natural-language image descriptions into concise English prompt tags.",
+    "Convert sentence-like Chinese into AI-friendly comma-separated tags.",
+    "Prefer concrete visual tags: subject, clothing, pose, scene, lighting, camera, style, quality.",
+    "Keep existing English tags and artist names as-is.",
+    "Do not output Chinese. Do not explain. Do not wrap the result in quotes or markdown.",
+    kind === "negative"
+      ? "This is a negative prompt: use exclusion tags for unwanted artifacts, anatomy issues, quality problems, text, watermarks, and blur."
+      : "This is a positive prompt: optimize for useful descriptive tags, not prose.",
+    "Examples:",
+    ...examples,
+  ].join("\n");
+}
+
+function buildTranslationUserPrompt(text: string, direction: TranslationDirection, kind: "positive" | "negative") {
+  if (direction === "en-to-zh") {
+    return `请把下面的${kind === "negative" ? "负向" : "正向"}prompt 翻译成中文，保留它的 tag 含义：\n${text}`;
+  }
+
+  return [
+    `请把下面的中文${kind === "negative" ? "负向" : "正向"}prompt 翻译并优化成英文 AI 绘图 tag。`,
+    "要求：逗号分隔，简洁，适合 NovelAI/WebUI，保留已有英文 tag。",
+    text,
+  ].join("\n");
 }
 
 function loadSettings(): AppSettings {
@@ -1864,6 +2388,34 @@ function base64ToBlob(base64: string, mimeType: string) {
   return new Blob([bytes], { type: mimeType });
 }
 
+async function imageAssetFromFile(file: File): Promise<ImageAsset> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
+    reader.readAsDataURL(file);
+  });
+  const marker = ";base64,";
+  const markerIndex = dataUrl.indexOf(marker);
+  if (markerIndex < 0) {
+    throw new Error("图片不是 base64 data URL。");
+  }
+  const mimeType = dataUrl.slice("data:".length, markerIndex) || file.type || "image/png";
+  return {
+    name: file.name,
+    mimeType,
+    base64: dataUrl.slice(markerIndex + marker.length),
+  };
+}
+
+function generatedImageToAsset(image: GeneratedImage): ImageAsset {
+  return {
+    name: image.fileName,
+    mimeType: image.mimeType,
+    base64: image.base64,
+  };
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -1901,6 +2453,29 @@ function buildPayloadPreview(request: ImageRequest) {
     deliberate_euler_ancestral_bug: request.deliberateEulerAncestralBug,
     prefer_brownian: request.preferBrownian,
   };
+
+  if (request.action === "img2img" || request.action === "infill") {
+    parameters.image = request.sourceImage ? `[${request.sourceImage.name}]` : undefined;
+    parameters.strength = request.strength;
+    parameters.noise = request.noise;
+    parameters.extra_noise_seed = request.extraNoiseSeed;
+    parameters.color_correct = request.colorCorrect;
+  }
+  if (request.action === "infill") {
+    parameters.mask = request.maskImage ? `[${request.maskImage.name}]` : undefined;
+  }
+  if (request.referenceImage) {
+    parameters.reference_image = "[encoded vibe]";
+    parameters.reference_strength = request.referenceStrength;
+    parameters.reference_information_extracted = request.referenceInformationExtracted;
+  }
+  if (request.directorReferenceImage) {
+    parameters.director_reference_images = [`[${request.directorReferenceImage.name}]`];
+    parameters.director_reference_descriptions = [request.directorReferencePrompt || request.prompt];
+    parameters.director_reference_strength_values = [request.directorReferenceStrength];
+    parameters.director_reference_secondary_strength_values = [request.directorReferenceSecondaryStrength];
+    parameters.director_reference_information_extracted = [request.directorReferenceInformationExtracted];
+  }
 
   if (isV4ImageModel(request.model)) {
     const characterCaptions = buildCharacterCaptions(request);
@@ -1941,6 +2516,17 @@ function buildPayloadPreview(request: ImageRequest) {
   };
 }
 
+function buildBackendImageRequest(request: ImageRequest) {
+  return {
+    ...request,
+    sourceImage: request.sourceImage?.base64,
+    maskImage: request.maskImage?.base64,
+    vibeSourceImage: undefined,
+    referenceImage: request.referenceImage,
+    directorReferenceImage: request.directorReferenceImage?.base64,
+  };
+}
+
 function isV4ImageModel(model: string) {
   return model.includes("diffusion-4");
 }
@@ -1967,12 +2553,41 @@ function normalizeImageRequest(request: ImageRequest): ImageRequest {
       y: clampCoordinate(character.y),
     })),
     useCharacterCoords: request.useCharacterCoords ?? false,
+    strength: clamp01(request.strength ?? DEFAULT_REQUEST.strength),
+    noise: clamp01(request.noise ?? DEFAULT_REQUEST.noise),
+    colorCorrect: request.colorCorrect ?? DEFAULT_REQUEST.colorCorrect,
+    referenceStrength: clamp01(request.referenceStrength ?? DEFAULT_REQUEST.referenceStrength),
+    referenceInformationExtracted: clamp01(request.referenceInformationExtracted ?? DEFAULT_REQUEST.referenceInformationExtracted),
+    directorReferencePrompt: request.directorReferencePrompt ?? "",
+    directorReferenceStrength: clamp01(request.directorReferenceStrength ?? DEFAULT_REQUEST.directorReferenceStrength),
+    directorReferenceSecondaryStrength: clamp01(request.directorReferenceSecondaryStrength ?? DEFAULT_REQUEST.directorReferenceSecondaryStrength),
+    directorReferenceInformationExtracted: clamp01(request.directorReferenceInformationExtracted ?? DEFAULT_REQUEST.directorReferenceInformationExtracted),
   };
+}
+
+function extractTagSuggestions(value: unknown): TagSuggestion[] {
+  const source = isRecord(value) && Array.isArray(value.tags) ? value.tags : [];
+  return source
+    .filter(isRecord)
+    .map((item) => ({
+      tag: typeof item.tag === "string" ? item.tag : "",
+      count: typeof item.count === "number" ? item.count : undefined,
+      confidence: typeof item.confidence === "number" ? item.confidence : undefined,
+    }))
+    .filter((item) => item.tag.trim())
+    .slice(0, 12);
 }
 
 function clampCoordinate(value: number) {
   if (!Number.isFinite(value)) {
     return 0.5;
+  }
+  return Math.min(1, Math.max(0, Number(value.toFixed(2))));
+}
+
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
   }
   return Math.min(1, Math.max(0, Number(value.toFixed(2))));
 }
