@@ -13,12 +13,15 @@ import {
   Maximize2,
   RotateCcw,
   Save,
+  Search,
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   RefreshCw,
   Upload,
+  UserPlus,
+  Users,
   WandSparkles,
   ZoomIn,
 } from "lucide-react";
@@ -32,6 +35,8 @@ type ImageFormat = "png" | "webp";
 type ImageRequest = {
   prompt: string;
   negativePrompt: string;
+  characters: CharacterPrompt[];
+  useCharacterCoords: boolean;
   model: string;
   action: ImageAction;
   width: number;
@@ -53,6 +58,14 @@ type ImageRequest = {
   skipCfgAboveSigma?: number;
   deliberateEulerAncestralBug: boolean;
   preferBrownian: boolean;
+};
+
+type CharacterPrompt = {
+  id: string;
+  prompt: string;
+  negativePrompt: string;
+  x: number;
+  y: number;
 };
 
 type GeneratedImage = {
@@ -89,6 +102,7 @@ type AppSettings = {
   showPayloadPreview: boolean;
   enableAppLogs: boolean;
   historyDisplayLimit: number;
+  knowledgeServerUrl: string;
 };
 
 type AccountSummary = {
@@ -107,6 +121,8 @@ type PngTextChunk = {
 type ImportedImageMetadata = {
   prompt?: string;
   negativePrompt?: string;
+  characters?: CharacterPrompt[];
+  useCharacterCoords?: boolean;
   width?: number;
   height?: number;
   steps?: number;
@@ -117,6 +133,27 @@ type ImportedImageMetadata = {
   noiseSchedule?: string;
   model?: string;
   nSamples?: number;
+};
+
+type PromptEntryType = "style" | "action" | "character";
+
+type PromptLibraryEntry = {
+  id: number;
+  slug: string;
+  entry_type: PromptEntryType;
+  title: string;
+  summary: string;
+  prompt: string;
+  negative_prompt?: string;
+  tags?: string[];
+  category?: {
+    slug: string;
+    name: string;
+  } | null;
+  source?: {
+    slug: string;
+    title: string;
+  } | null;
 };
 
 const HISTORY_KEY = "novelai-gui-history";
@@ -130,11 +167,20 @@ const DEFAULT_SETTINGS: AppSettings = {
   showPayloadPreview: false,
   enableAppLogs: false,
   historyDisplayLimit: 8,
+  knowledgeServerUrl: "http://127.0.0.1:8710",
 };
+
+const PROMPT_ENTRY_TYPES: Array<{ type: PromptEntryType; label: string }> = [
+  { type: "style", label: "画风" },
+  { type: "action", label: "动作" },
+  { type: "character", label: "角色" },
+];
 
 const DEFAULT_REQUEST: ImageRequest = {
   prompt: "",
   negativePrompt: "lowres, blurry, bad anatomy, watermark, text",
+  characters: [],
+  useCharacterCoords: false,
   model: "nai-diffusion-4-5-full",
   action: "generate",
   width: 832,
@@ -198,13 +244,22 @@ function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(true);
+  const [characterOpen, setCharacterOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [activePanel, setActivePanel] = useState<"generate" | "settings">("generate");
+  const [activePanel, setActivePanel] = useState<"generate" | "promptLibrary" | "settings">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [isRefreshingAccount, setIsRefreshingAccount] = useState(false);
   const [lastCost, setLastCost] = useState<number | null>(null);
   const [historyReady, setHistoryReady] = useState(false);
+  const [promptLibraryType, setPromptLibraryType] = useState<PromptEntryType>("style");
+  const [promptLibraryQuery, setPromptLibraryQuery] = useState("");
+  const [promptLibraryResults, setPromptLibraryResults] = useState<PromptLibraryEntry[]>([]);
+  const [isSearchingPromptLibrary, setIsSearchingPromptLibrary] = useState(false);
+  const [promptLibraryStatus, setPromptLibraryStatus] = useState<string | null>(null);
+  const [selectedPromptEntries, setSelectedPromptEntries] = useState<
+    Partial<Record<PromptEntryType, PromptLibraryEntry>>
+  >({});
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -281,6 +336,14 @@ function App() {
     window.addEventListener("paste", onWindowPaste, true);
     return () => window.removeEventListener("paste", onWindowPaste, true);
   }, [activePanel]);
+
+  useEffect(() => {
+    if (activePanel !== "promptLibrary") {
+      return;
+    }
+
+    void searchPromptLibrary({ type: promptLibraryType, query: "" });
+  }, [activePanel, promptLibraryType]);
 
   const currentImage = activeImages[selectedImage];
   const visibleHistory = history.slice(0, settings.historyDisplayLimit);
@@ -420,8 +483,30 @@ function App() {
     }
   }
 
+  async function copyImage(image: GeneratedImage) {
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+        showNotice("error", "当前 WebView 不支持直接复制图片。");
+        return;
+      }
+
+      const blob = base64ToBlob(image.base64, image.mimeType);
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          [blob.type]: blob,
+        }),
+      ]);
+      showNotice("success", "图片已复制到剪贴板。");
+      writeAppLog("success", "copy-image", `已复制图片：${image.fileName}`);
+    } catch (error) {
+      const message = String(error);
+      showNotice("error", `复制图片失败：${message}`);
+      writeAppLog("error", "copy-image", message);
+    }
+  }
+
   function reuse(item: HistoryItem) {
-    setRequest(item.request);
+    setRequest(normalizeImageRequest(item.request));
     setActiveImages(item.images);
     setSelectedImage(0);
     showNotice("info", "已恢复历史参数。");
@@ -433,6 +518,116 @@ function App() {
 
   function updateSetting<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
     setSettings((current) => ({ ...current, [key]: value }));
+  }
+
+  async function searchPromptLibrary(options?: { type?: PromptEntryType; query?: string }) {
+    const baseUrl = normalizeServerUrl(settings.knowledgeServerUrl);
+    if (!baseUrl) {
+      setPromptLibraryStatus("先在设置里配置素材库服务地址。");
+      return;
+    }
+
+    const entryType = options?.type ?? promptLibraryType;
+    const query = options?.query ?? promptLibraryQuery;
+
+    setIsSearchingPromptLibrary(true);
+    setPromptLibraryStatus(null);
+    try {
+      const params = new URLSearchParams({
+        type: entryType,
+        limit: "24",
+      });
+      if (query.trim()) {
+        params.set("query", query.trim());
+      }
+
+      const response = await fetch(`${baseUrl}/api/entries?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`素材库请求失败：HTTP ${response.status}`);
+      }
+
+      const results = (await response.json()) as PromptLibraryEntry[];
+      setPromptLibraryResults(results);
+      setPromptLibraryStatus(results.length > 0 ? `找到 ${results.length} 条结果。` : "没有匹配结果。");
+    } catch (error) {
+      setPromptLibraryResults([]);
+      setPromptLibraryStatus(String(error));
+    } finally {
+      setIsSearchingPromptLibrary(false);
+    }
+  }
+
+  function togglePromptEntry(entry: PromptLibraryEntry) {
+    const prompt = entry.prompt.trim();
+    if (!prompt) {
+      setPromptLibraryStatus("这个条目没有可用 prompt。");
+      return;
+    }
+
+    const currentSelection = selectedPromptEntries[entry.entry_type];
+    const isSameSelection = currentSelection?.slug === entry.slug;
+
+    setSelectedPromptEntries((current) => {
+      const next = { ...current };
+      if (isSameSelection) {
+        delete next[entry.entry_type];
+      } else {
+        next[entry.entry_type] = entry;
+      }
+      return next;
+    });
+
+    setRequest((current) => {
+      let nextPrompt = current.prompt;
+      if (currentSelection?.prompt) {
+        nextPrompt = removePromptText(nextPrompt, currentSelection.prompt);
+      }
+      if (!isSameSelection) {
+        nextPrompt = appendPromptText(nextPrompt, prompt);
+      }
+      return {
+        ...current,
+        prompt: nextPrompt,
+      };
+    });
+
+    setPromptLibraryStatus(isSameSelection ? `已取消：${entry.title}` : `已选择：${entry.title}`);
+  }
+
+  function addCharacter() {
+    const characters = request.characters ?? [];
+    const index = characters.length;
+    const nextCharacter: CharacterPrompt = {
+      id: crypto.randomUUID(),
+      prompt: "",
+      negativePrompt: "",
+      x: clampCoordinate(0.35 + index * 0.2),
+      y: 0.5,
+    };
+    update("characters", [...characters, nextCharacter]);
+    if (characters.length >= 1 && !request.useCharacterCoords) {
+      update("useCharacterCoords", true);
+    }
+  }
+
+  function updateCharacter<K extends keyof CharacterPrompt>(
+    id: string,
+    key: K,
+    value: CharacterPrompt[K],
+  ) {
+    update(
+      "characters",
+      (request.characters ?? []).map((character) =>
+        character.id === id ? { ...character, [key]: value } : character,
+      ),
+    );
+  }
+
+  function removeCharacter(id: string) {
+    update(
+      "characters",
+      (request.characters ?? []).filter((character) => character.id !== id),
+    );
   }
 
   function clearHistory() {
@@ -464,7 +659,7 @@ function App() {
   async function importPngFile(file: File) {
     try {
       const imported = parseNovelAiPngMetadata(await file.arrayBuffer());
-      if (!imported.prompt && !imported.negativePrompt) {
+      if (!imported.prompt && !imported.negativePrompt && (imported.characters ?? []).length === 0) {
         showNotice("info", "PNG 中没有识别到 NovelAI prompt。");
         writeAppLog("warning", "png-import", `${file.name} 没有识别到 NovelAI prompt。`);
         return;
@@ -474,6 +669,8 @@ function App() {
         ...current,
         prompt: imported.prompt ?? current.prompt,
         negativePrompt: imported.negativePrompt ?? current.negativePrompt,
+        characters: imported.characters ?? current.characters,
+        useCharacterCoords: imported.useCharacterCoords ?? current.useCharacterCoords,
         width: imported.width ?? current.width,
         height: imported.height ?? current.height,
         steps: imported.steps ?? current.steps,
@@ -485,6 +682,9 @@ function App() {
         model: imported.model ?? current.model,
         nSamples: imported.nSamples ?? current.nSamples,
       }));
+      if ((imported.characters ?? []).length > 0) {
+        setCharacterOpen(true);
+      }
       showNotice("success", "已从 PNG 元数据导入 prompt 和生成参数。");
       writeAppLog("success", "png-import", `已导入 ${file.name} 的 PNG 元数据。`);
     } catch (error) {
@@ -547,6 +747,14 @@ function App() {
           type="button"
         >
           <Images aria-hidden="true" />
+        </button>
+        <button
+          className={activePanel === "promptLibrary" ? "nav-button active" : "nav-button"}
+          onClick={() => setActivePanel("promptLibrary")}
+          title="Prompt 助手"
+          type="button"
+        >
+          <WandSparkles aria-hidden="true" />
         </button>
         <button
           className={activePanel === "settings" ? "nav-button active" : "nav-button"}
@@ -714,8 +922,8 @@ function App() {
               <button
                 className="icon-button"
                 disabled={!currentImage}
-                onClick={() => currentImage && navigator.clipboard.writeText(String(request.seed ?? ""))}
-                title="复制种子"
+                onClick={() => currentImage && copyImage(currentImage)}
+                title="复制图片"
                 type="button"
               >
                 <Copy aria-hidden="true" />
@@ -801,6 +1009,94 @@ function App() {
           </div>
         </section>
 
+        <section className="parameter-card character-card">
+          <button className="section-toggle" onClick={() => setCharacterOpen((open) => !open)} type="button">
+            <span>
+              <Users aria-hidden="true" />
+              Characters
+            </span>
+            {(request.characters ?? []).length > 0 ? (
+              <span className="section-meta">{(request.characters ?? []).length}</span>
+            ) : null}
+            <ChevronDown className={characterOpen ? "open" : ""} aria-hidden="true" />
+          </button>
+
+          {characterOpen ? (
+            !isV4ImageModel(request.model) ? (
+              <div className="model-note">
+                <ShieldCheck aria-hidden="true" />
+                Character 仅对 NAI 4 / 4.5 模型生效。
+              </div>
+            ) : (
+              <>
+                <div className="character-toolbar">
+                  <Toggle
+                    label="使用角色坐标"
+                    checked={request.useCharacterCoords}
+                    onChange={(value) => update("useCharacterCoords", value)}
+                  />
+                  <button className="ghost-button" onClick={addCharacter} type="button">
+                    <UserPlus aria-hidden="true" />
+                    添加
+                  </button>
+                </div>
+                {(request.characters ?? []).length === 0 ? (
+                  <div className="character-empty">添加角色后，会写入 V4 char_captions。</div>
+                ) : (
+                  <div className="character-list">
+                    {(request.characters ?? []).map((character, index) => (
+                      <div className="character-item" key={character.id}>
+                        <div className="character-head">
+                          <strong>角色 {index + 1}</strong>
+                          <button className="icon-button" onClick={() => removeCharacter(character.id)} title="删除角色" type="button">
+                            <Eraser aria-hidden="true" />
+                          </button>
+                        </div>
+                        <label className="field">
+                          <span>角色提示词</span>
+                          <textarea
+                            value={character.prompt}
+                            onChange={(event) => updateCharacter(character.id, "prompt", event.target.value)}
+                            placeholder="1girl, pink hair, school uniform"
+                            rows={3}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>角色负向提示词</span>
+                          <textarea
+                            value={character.negativePrompt}
+                            onChange={(event) => updateCharacter(character.id, "negativePrompt", event.target.value)}
+                            placeholder="bad hands, blurry"
+                            rows={2}
+                          />
+                        </label>
+                        <div className="field-grid">
+                          <NumberField
+                            label="X"
+                            value={character.x}
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            onChange={(value) => updateCharacter(character.id, "x", clampCoordinate(value))}
+                          />
+                          <NumberField
+                            label="Y"
+                            value={character.y}
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            onChange={(value) => updateCharacter(character.id, "y", clampCoordinate(value))}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )
+          ) : null}
+        </section>
+
         <section className="parameter-card">
           <div className="section-head">
             <SlidersHorizontal aria-hidden="true" />
@@ -884,24 +1180,6 @@ function App() {
           ) : null}
         </section>
 
-        <section className="parameter-card">
-          <div className="section-head">
-            <Braces aria-hidden="true" />
-            <h2>输出设置</h2>
-          </div>
-          <div className="field-grid">
-            <label className="field">
-              <span>格式</span>
-              <select value={request.imageFormat} onChange={(event) => update("imageFormat", event.target.value as ImageFormat)}>
-                <option value="png">png</option>
-                <option value="webp">webp</option>
-              </select>
-            </label>
-            <NumberField label="UC 预设" value={request.ucPreset} min={0} max={5} onChange={(value) => update("ucPreset", value)} />
-            <NumberField label="参数版本" value={request.paramsVersion} min={1} max={4} onChange={(value) => update("paramsVersion", value)} />
-          </div>
-        </section>
-
         {settings.showPayloadPreview ? (
           <section className="payload-preview">
             <div className="section-head">
@@ -913,6 +1191,84 @@ function App() {
         ) : null}
       </aside>
         </>
+      ) : activePanel === "promptLibrary" ? (
+        <section className="prompt-library-page" aria-label="Prompt library">
+          <header className="settings-header">
+            <div>
+              <p className="eyebrow">Local Library</p>
+              <h2>Prompt 助手</h2>
+              <span>从本地素材库选择画风、动作和角色；同类型再次选择会替换当前项。</span>
+            </div>
+          </header>
+
+          <section className="settings-panel prompt-library-panel">
+            <div className="section-head">
+              <WandSparkles aria-hidden="true" />
+              <h2>素材查询</h2>
+            </div>
+
+            <div className="prompt-library-tabs">
+              {PROMPT_ENTRY_TYPES.map((item) => (
+                <button
+                  className={promptLibraryType === item.type ? "chip active" : "chip"}
+                  key={item.type}
+                  onClick={() => {
+                    setPromptLibraryType(item.type);
+                    setPromptLibraryResults([]);
+                    setPromptLibraryStatus(null);
+                    setPromptLibraryQuery("");
+                  }}
+                  type="button"
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="prompt-library-search">
+              <input
+                value={promptLibraryQuery}
+                onChange={(event) => setPromptLibraryQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void searchPromptLibrary();
+                  }
+                }}
+                placeholder="搜索 wlop、坐姿、女仆..."
+              />
+              <button className="icon-button filled" onClick={() => void searchPromptLibrary()} disabled={isSearchingPromptLibrary} title="搜索" type="button">
+                {isSearchingPromptLibrary ? <Loader2 className="spin" aria-hidden="true" /> : <Search aria-hidden="true" />}
+              </button>
+            </div>
+
+            {promptLibraryStatus ? <div className="prompt-library-status">{promptLibraryStatus}</div> : null}
+
+            <div className="prompt-library-selection">
+              {PROMPT_ENTRY_TYPES.map((item) => (
+                <span key={item.type}>
+                  {item.label}：{selectedPromptEntries[item.type]?.title ?? "未选择"}
+                </span>
+              ))}
+            </div>
+
+            <div className="prompt-library-results">
+              {promptLibraryResults.map((entry) => (
+                <button
+                  className={selectedPromptEntries[entry.entry_type]?.slug === entry.slug ? "prompt-library-item active" : "prompt-library-item"}
+                  key={entry.slug}
+                  onClick={() => togglePromptEntry(entry)}
+                  type="button"
+                >
+                  <strong>{entry.title}</strong>
+                  <span>{entry.category?.name ?? promptEntryTypeLabel(entry.entry_type)} · {entry.source?.title ?? "本地素材库"}</span>
+                  <em>{entry.prompt}</em>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {notice ? <div className={`notice settings-notice ${notice.type}`}>{notice.message}</div> : null}
+        </section>
       ) : (
         <section className="settings-page" aria-label="Application settings">
           <header className="settings-header">
@@ -984,6 +1340,32 @@ function App() {
                   max={MAX_HISTORY_ITEMS}
                   onChange={(value) => updateSetting("historyDisplayLimit", clampHistoryLimit(value))}
                 />
+                <label className="field">
+                  <span>素材库服务地址</span>
+                  <input
+                    value={settings.knowledgeServerUrl}
+                    onChange={(event) => updateSetting("knowledgeServerUrl", event.target.value)}
+                    placeholder="http://127.0.0.1:8710"
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="settings-panel">
+              <div className="section-head">
+                <Braces aria-hidden="true" />
+                <h2>输出设置</h2>
+              </div>
+              <div className="settings-stack">
+                <label className="field">
+                  <span>格式</span>
+                  <select value={request.imageFormat} onChange={(event) => update("imageFormat", event.target.value as ImageFormat)}>
+                    <option value="png">png</option>
+                    <option value="webp">webp</option>
+                  </select>
+                </label>
+                <NumberField label="UC 预设" value={request.ucPreset} min={0} max={5} onChange={(value) => update("ucPreset", value)} />
+                <NumberField label="参数版本" value={request.paramsVersion} min={1} max={4} onChange={(value) => update("paramsVersion", value)} />
               </div>
             </section>
 
@@ -1086,14 +1468,78 @@ function loadSettings(): AppSettings {
       historyDisplayLimit: clampHistoryLimit(
         parsed.historyDisplayLimit ?? DEFAULT_SETTINGS.historyDisplayLimit,
       ),
+      knowledgeServerUrl: parsed.knowledgeServerUrl ?? DEFAULT_SETTINGS.knowledgeServerUrl,
     };
   } catch {
     return DEFAULT_SETTINGS;
   }
 }
 
+function normalizeServerUrl(value: string) {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function appendPromptText(current: string, addition: string) {
+  const left = current.trim();
+  const right = addition.trim();
+
+  if (!left) {
+    return right;
+  }
+
+  if (!right) {
+    return left;
+  }
+
+  return `${left}, ${right}`;
+}
+
+function removePromptText(current: string, removal: string) {
+  const removalParts = splitPromptParts(removal);
+  if (removalParts.length === 0) {
+    return current.trim();
+  }
+
+  const removalSet = new Set(removalParts.map((part) => normalizePromptPart(part)));
+  return splitPromptParts(current)
+    .filter((part) => !removalSet.has(normalizePromptPart(part)))
+    .join(", ");
+}
+
+function splitPromptParts(value: string) {
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function normalizePromptPart(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function promptEntryTypeLabel(type: PromptEntryType) {
+  if (type === "style") {
+    return "画风";
+  }
+
+  if (type === "action") {
+    return "动作";
+  }
+
+  return "角色";
+}
+
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
+}
+
+function base64ToBlob(base64: string, mimeType: string) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: mimeType });
 }
 
 function formatBytes(bytes: number) {
@@ -1135,23 +1581,31 @@ function buildPayloadPreview(request: ImageRequest) {
   };
 
   if (isV4ImageModel(request.model)) {
+    const characterCaptions = buildCharacterCaptions(request);
+    const useCoords = request.useCharacterCoords && characterCaptions.length > 0;
     parameters.legacy = false;
     parameters.legacy_uc = false;
     parameters.add_original_image = false;
     parameters.autoSmea = false;
-    parameters.use_coords = false;
+    parameters.use_coords = useCoords;
     parameters.v4_prompt = {
       caption: {
         base_caption: request.prompt,
-        char_captions: [],
+        char_captions: characterCaptions.map((character) => ({
+          char_caption: character.prompt,
+          centers: character.centers,
+        })),
       },
-      use_coords: false,
+      use_coords: useCoords,
       use_order: true,
     };
     parameters.v4_negative_prompt = {
       caption: {
         base_caption: request.negativePrompt,
-        char_captions: [],
+        char_captions: characterCaptions.map((character) => ({
+          char_caption: character.negativePrompt,
+          centers: character.centers,
+        })),
       },
       legacy_uc: false,
     };
@@ -1167,6 +1621,38 @@ function buildPayloadPreview(request: ImageRequest) {
 
 function isV4ImageModel(model: string) {
   return model.includes("diffusion-4");
+}
+
+function buildCharacterCaptions(request: ImageRequest) {
+  return (request.characters ?? [])
+    .map((character) => ({
+      prompt: character.prompt.trim(),
+      negativePrompt: character.negativePrompt.trim(),
+      centers: [{ x: clampCoordinate(character.x), y: clampCoordinate(character.y) }],
+    }))
+    .filter((character) => character.prompt.length > 0);
+}
+
+function normalizeImageRequest(request: ImageRequest): ImageRequest {
+  return {
+    ...DEFAULT_REQUEST,
+    ...request,
+    characters: (request.characters ?? []).map((character) => ({
+      id: character.id || crypto.randomUUID(),
+      prompt: character.prompt ?? "",
+      negativePrompt: character.negativePrompt ?? "",
+      x: clampCoordinate(character.x),
+      y: clampCoordinate(character.y),
+    })),
+    useCharacterCoords: request.useCharacterCoords ?? false,
+  };
+}
+
+function clampCoordinate(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0.5;
+  }
+  return Math.min(1, Math.max(0, Number(value.toFixed(2))));
 }
 
 function summarizeAccount(raw: unknown): AccountSummary {
@@ -1318,7 +1804,10 @@ async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {
     const tx = db.transaction(HISTORY_STORE_NAME, "readonly");
     const store = tx.objectStore(HISTORY_STORE_NAME);
     const items = (await requestToPromise<HistoryItem[]>(store.getAll())) ?? [];
-    return sortHistory(items);
+    return sortHistory(items).map((item) => ({
+      ...item,
+      request: normalizeImageRequest(item.request),
+    }));
   } finally {
     db.close();
   }
@@ -1354,7 +1843,7 @@ function migrateLegacyHistoryFromLocalStorage() {
     return parsed.map((item) => ({
       id: item.id,
       createdAt: item.createdAt,
-      request: item.request,
+      request: normalizeImageRequest(item.request),
       images: [],
     }));
   } catch {
@@ -1438,6 +1927,8 @@ function parseNovelAiPngMetadata(buffer: ArrayBuffer): ImportedImageMetadata {
     findNestedCaptionText(parsedObjects, "v4_negative_prompt") ??
     parseNegativePromptFromMetadataStrings(rawCandidates) ??
     undefined;
+  const characters = findCharacterPromptsFromSources(parsedObjects);
+  const useCharacterCoords = findBooleanInSources(parsedObjects, ["use_coords", "usecoords"]);
 
   const width = findNumberInSources(parsedObjects, ["width"]);
   const height = findNumberInSources(parsedObjects, ["height"]);
@@ -1453,6 +1944,8 @@ function parseNovelAiPngMetadata(buffer: ArrayBuffer): ImportedImageMetadata {
   return {
     prompt: extractPromptText(prompt),
     negativePrompt: extractPromptText(negativePrompt),
+    characters,
+    useCharacterCoords: characters.length > 0 ? (useCharacterCoords ?? hasCharacterCenters(characters)) : undefined,
     width,
     height,
     steps,
@@ -1493,6 +1986,110 @@ function findNumberInSources(sources: unknown[], keys: string[]) {
     }
   }
   return undefined;
+}
+
+function findBooleanInSources(sources: unknown[], keys: string[]) {
+  for (const source of sources) {
+    const found = findBooleanByKeys(source, keys);
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+function findCharacterPromptsFromSources(sources: unknown[]): CharacterPrompt[] {
+  const positive = findV4CharacterCaptions(sources, "v4_prompt");
+  const negative = findV4CharacterCaptions(sources, "v4_negative_prompt");
+  const count = Math.max(positive.length, negative.length);
+  const characters: CharacterPrompt[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const positiveCharacter = positive[index];
+    const negativeCharacter = negative[index];
+    const prompt = positiveCharacter?.prompt ?? "";
+    const negativePrompt = negativeCharacter?.prompt ?? "";
+    const center = positiveCharacter?.center ?? negativeCharacter?.center ?? defaultCharacterCenter(index);
+
+    if (!prompt.trim() && !negativePrompt.trim()) {
+      continue;
+    }
+
+    characters.push({
+      id: crypto.randomUUID(),
+      prompt,
+      negativePrompt,
+      x: clampCoordinate(center.x),
+      y: clampCoordinate(center.y),
+    });
+  }
+
+  return characters;
+}
+
+function findV4CharacterCaptions(sources: unknown[], key: string) {
+  for (const source of sources) {
+    const candidate = findByKeys(source, [key]);
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+
+    const caption = findByKeys(candidate, ["caption"]);
+    if (!caption || typeof caption !== "object") {
+      continue;
+    }
+
+    const rawCharacters = findByKeys(caption, ["char_captions", "charCaptions"]);
+    if (!Array.isArray(rawCharacters)) {
+      continue;
+    }
+
+    return rawCharacters
+      .map((value, index) => parseV4CharacterCaption(value, index))
+      .filter((value): value is { prompt: string; center: { x: number; y: number } } => value !== null);
+  }
+
+  return [];
+}
+
+function parseV4CharacterCaption(value: unknown, index: number) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const prompt = findStringByKeys(value, ["char_caption", "charCaption", "caption", "prompt"]) ?? "";
+  const center = findCharacterCenter(value) ?? defaultCharacterCenter(index);
+  return {
+    prompt,
+    center,
+  };
+}
+
+function findCharacterCenter(value: unknown) {
+  const centers = findByKeys(value, ["centers", "center"]);
+  const firstCenter = Array.isArray(centers) ? centers[0] : centers;
+  if (!firstCenter || typeof firstCenter !== "object") {
+    return undefined;
+  }
+
+  const x = findNumberByKeys(firstCenter, ["x"]);
+  const y = findNumberByKeys(firstCenter, ["y"]);
+  if (x === undefined || y === undefined) {
+    return undefined;
+  }
+
+  return { x, y };
+}
+
+function defaultCharacterCenter(index: number) {
+  return {
+    x: clampCoordinate(0.35 + index * 0.2),
+    y: 0.5,
+  };
+}
+
+function hasCharacterCenters(characters: CharacterPrompt[]) {
+  return characters.some((character) => Number.isFinite(character.x) && Number.isFinite(character.y));
 }
 
 function parsePromptTextFromMetadataStrings(values: string[]) {

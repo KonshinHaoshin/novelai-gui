@@ -78,7 +78,8 @@ h2 {
 .nav-rail,
 .prompt-rail,
 .canvas-stage,
-.parameter-rail {
+.parameter-rail,
+.prompt-library-page {
   min-width: 0;
 }
 
@@ -186,6 +187,15 @@ h2 {
   gap: 14px;
   min-height: calc(100vh - 28px);
   min-width: 0;
+}
+
+.prompt-library-page {
+  grid-column: 2 / 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  min-height: calc(100vh - 28px);
 }
 
 .brand-card,
@@ -349,6 +359,62 @@ h2 {
   flex: 0 0 auto;
 }
 
+.character-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.character-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.character-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  padding: 10px;
+}
+
+.character-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.character-head strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.character-head .icon-button {
+  width: 30px;
+  height: 30px;
+}
+
+.character-item textarea {
+  min-height: 68px;
+  resize: vertical;
+}
+
+.character-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 12px;
+}
+
 .card-head span,
 .section-meta {
   color: #9aa1ad;
@@ -434,6 +500,125 @@ select:focus {
   font-size: 11px;
   font-weight: 760;
   padding: 4px 9px;
+}
+
+.prompt-library-card {
+  gap: 10px;
+}
+
+.prompt-library-panel {
+  width: min(760px, 100%);
+}
+
+.prompt-library-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.prompt-library-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 8px;
+}
+
+.prompt-library-search .icon-button {
+  width: 38px;
+  height: 38px;
+}
+
+.prompt-library-status {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.prompt-library-status {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  padding: 8px 9px;
+}
+
+.prompt-library-selection {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.prompt-library-selection span {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: #5d6570;
+  font-size: 11px;
+  font-weight: 760;
+  overflow: hidden;
+  padding: 7px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-library-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(520px, 55vh);
+  overflow: auto;
+}
+
+.prompt-library-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 9px;
+  text-align: left;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.prompt-library-item:hover {
+  border-color: #bde7e4;
+  background: #f4fbfa;
+  transform: translateY(-1px);
+}
+
+.prompt-library-item.active {
+  border-color: var(--accent);
+  background: #e8f7f6;
+  box-shadow: inset 0 0 0 1px #bde7e4;
+}
+
+.prompt-library-item strong {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.prompt-library-item span {
+  color: #7a828d;
+  font-size: 11px;
+}
+
+.prompt-library-item em {
+  display: -webkit-box;
+  max-height: 4.1em;
+  overflow: hidden;
+  color: #4f5763;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .eyebrow {
@@ -1010,6 +1195,7 @@ select:focus {
     min-height: auto;
   }
 
+  .prompt-library-page,
   .settings-page {
     grid-column: 2 / 4;
   }
@@ -1038,10 +1224,12 @@ select:focus {
   .prompt-rail,
   .canvas-stage,
   .parameter-rail,
+  .prompt-library-page,
   .settings-page {
     min-height: auto;
   }
 
+  .prompt-library-page,
   .settings-page {
     grid-column: auto;
   }

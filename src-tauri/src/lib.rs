@@ -19,6 +19,10 @@ pub struct ImageGenerateRequest {
     pub prompt: String,
     #[serde(default)]
     pub negative_prompt: String,
+    #[serde(default)]
+    pub characters: Vec<CharacterPrompt>,
+    #[serde(default)]
+    pub use_character_coords: bool,
     pub model: String,
     pub action: String,
     pub width: u32,
@@ -42,6 +46,22 @@ pub struct ImageGenerateRequest {
     pub prefer_brownian: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterPrompt {
+    pub prompt: String,
+    #[serde(default)]
+    pub negative_prompt: String,
+    pub x: f32,
+    pub y: f32,
+}
+
+struct CharacterCaptionPayload {
+    prompt: String,
+    negative_prompt: String,
+    centers: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,23 +131,37 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
     });
 
     if is_v4_image_model(&request.model) {
+        let character_captions = build_character_captions(&request.characters);
+        let use_coords = request.use_character_coords && !character_captions.is_empty();
         parameters["legacy"] = serde_json::json!(false);
         parameters["legacy_uc"] = serde_json::json!(false);
         parameters["add_original_image"] = serde_json::json!(false);
         parameters["autoSmea"] = serde_json::json!(false);
-        parameters["use_coords"] = serde_json::json!(false);
+        parameters["use_coords"] = serde_json::json!(use_coords);
         parameters["v4_prompt"] = serde_json::json!({
             "caption": {
                 "base_caption": request.prompt,
-                "char_captions": []
+                "char_captions": character_captions
+                    .iter()
+                    .map(|character| serde_json::json!({
+                        "char_caption": &character.prompt,
+                        "centers": &character.centers
+                    }))
+                    .collect::<Vec<_>>()
             },
-            "use_coords": false,
+            "use_coords": use_coords,
             "use_order": true
         });
         parameters["v4_negative_prompt"] = serde_json::json!({
             "caption": {
                 "base_caption": request.negative_prompt,
-                "char_captions": []
+                "char_captions": character_captions
+                    .iter()
+                    .map(|character| serde_json::json!({
+                        "char_caption": &character.negative_prompt,
+                        "centers": &character.centers
+                    }))
+                    .collect::<Vec<_>>()
             },
             "legacy_uc": false
         });
@@ -245,6 +279,34 @@ fn read_token() -> Result<String, String> {
         Ok(_) | Err(keyring::Error::NoEntry) => Err("API Token is not configured".to_string()),
         Err(err) => Err(to_error(err)),
     }
+}
+
+fn build_character_captions(characters: &[CharacterPrompt]) -> Vec<CharacterCaptionPayload> {
+    characters
+        .iter()
+        .filter_map(|character| {
+            let prompt = character.prompt.trim();
+            if prompt.is_empty() {
+                return None;
+            }
+
+            Some(CharacterCaptionPayload {
+                prompt: prompt.to_string(),
+                negative_prompt: character.negative_prompt.trim().to_string(),
+                centers: vec![serde_json::json!({
+                    "x": clamp_coordinate(character.x),
+                    "y": clamp_coordinate(character.y)
+                })],
+            })
+        })
+        .collect()
+}
+
+fn clamp_coordinate(value: f32) -> f32 {
+    if !value.is_finite() {
+        return 0.5;
+    }
+    value.clamp(0.0, 1.0)
 }
 
 fn decode_generated_images(
