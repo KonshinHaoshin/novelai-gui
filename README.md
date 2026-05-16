@@ -1,6 +1,6 @@
-# Novel GUI
+# NovelAI GUI
 
-Novel GUI 是一个面向 NovelAI 图像生成 API 的桌面客户端，基于 Tauri 2、React 和 TypeScript 构建。当前重点支持 NAI 4.5 图像生成工作流，提供提示词编辑、参数配置、生成预览、图片保存和历史记录管理。
+NovelAI GUI 是一个面向 NovelAI 图像生成 API 的桌面客户端，基于 Tauri 2、React 和 TypeScript 构建。当前重点支持 NAI 4.5 图像生成工作流，提供提示词编辑、参数配置、生成预览、图片保存和历史记录管理。
 
 ## 功能
 

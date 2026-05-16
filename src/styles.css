@@ -176,6 +176,7 @@ h2 {
   grid-column: 2 / 5;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 14px;
   min-height: calc(100vh - 28px);
   min-width: 0;
@@ -189,6 +190,7 @@ h2 {
 .result-strip,
 .parameter-card,
 .payload-preview,
+.account-card,
 .settings-header,
 .settings-panel {
   border: 1px solid var(--line);
@@ -198,6 +200,8 @@ h2 {
 }
 
 .settings-header {
+  width: 100%;
+  max-width: 980px;
   min-height: 104px;
   padding: 22px 24px;
 }
@@ -216,8 +220,10 @@ h2 {
 
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
+  width: 100%;
+  max-width: 980px;
   align-items: start;
 }
 
@@ -229,12 +235,12 @@ h2 {
 }
 
 .settings-panel.wide {
-  grid-column: 1 / -1;
+  grid-column: auto;
 }
 
 .settings-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -247,6 +253,35 @@ h2 {
   font-size: 12px;
   font-weight: 760;
   padding: 10px;
+}
+
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.account-grid span {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px;
+}
+
+.account-grid strong {
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 850;
+}
+
+.wide-button {
+  width: 100%;
 }
 
 .brand-card {
@@ -270,7 +305,8 @@ h2 {
 .prompt-card,
 .history-card,
 .parameter-card,
-.payload-preview {
+.payload-preview,
+.account-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -361,6 +397,24 @@ select:focus {
   font-size: 20px;
 }
 
+.account-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.account-pills span {
+  min-height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: #4f5763;
+  font-size: 11px;
+  font-weight: 760;
+  padding: 4px 9px;
+}
+
 .eyebrow {
   color: var(--accent-dark);
   font-size: 11px;
@@ -379,7 +433,8 @@ select:focus {
 
 .run-button,
 .ghost-button,
-.icon-button {
+.icon-button,
+.danger-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -391,9 +446,18 @@ select:focus {
     border-color 160ms ease;
 }
 
+/* 保证按钮内图标与文字不换行 */
+.run-button,
+.ghost-button,
+.danger-button,
+.more-tile {
+  white-space: nowrap;
+}
+
 .run-button:hover,
 .ghost-button:hover,
 .icon-button:hover,
+.danger-button:hover,
 .more-tile:hover,
 .history-item:hover,
 .chip:hover {
@@ -432,9 +496,20 @@ select:focus {
   color: #ffffff;
 }
 
+.danger-button {
+  min-height: 34px;
+  border: 1px solid #f0c2bd;
+  background: #fff5f4;
+  color: var(--red);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 820;
+}
+
 .run-button svg,
 .ghost-button svg,
 .icon-button svg,
+.danger-button svg,
 .section-head svg,
 .section-toggle svg,
 .token-status svg,
@@ -767,6 +842,7 @@ select:focus {
 
 .token-row input {
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .status-dot {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Novel GUI",
+  "productName": "NovelAI GUI",
   "version": "0.1.0",
   "identifier": "net.novelgui.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Novel GUI - AI 图像生成",
+        "title": "NovelAI GUI - AI 图像生成",
         "width": 1280,
         "height": 820,
         "minWidth": 1024,

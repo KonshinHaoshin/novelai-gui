@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Copy,
   Download,
+  Eraser,
   History,
   Images,
   ImagePlus,
@@ -16,6 +17,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  RefreshCw,
   WandSparkles,
   ZoomIn,
 } from "lucide-react";
@@ -78,6 +80,14 @@ type Notice = {
 type AppSettings = {
   showPayloadPreview: boolean;
   historyDisplayLimit: number;
+};
+
+type AccountSummary = {
+  tier?: string;
+  points?: number;
+  active?: boolean;
+  expiresAt?: number;
+  raw: unknown;
 };
 
 const HISTORY_KEY = "novel-gui-history";
@@ -158,6 +168,9 @@ function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [activePanel, setActivePanel] = useState<"generate" | "settings">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
+  const [account, setAccount] = useState<AccountSummary | null>(null);
+  const [isRefreshingAccount, setIsRefreshingAccount] = useState(false);
+  const [lastCost, setLastCost] = useState<number | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -166,7 +179,12 @@ function App() {
     }
 
     invoke<boolean>("has_api_token")
-      .then(setHasToken)
+      .then((configured) => {
+        setHasToken(configured);
+        if (configured) {
+          refreshAccountStatus(false);
+        }
+      })
       .catch((error) => showNotice("error", String(error)));
   }, []);
 
@@ -196,8 +214,36 @@ function App() {
       setToken("");
       setHasToken(true);
       showNotice("success", "Token 已保存到系统凭据。");
+      refreshAccountStatus(false);
     } catch (error) {
       showNotice("error", String(error));
+    }
+  }
+
+  async function refreshAccountStatus(showResult = true) {
+    if (!isTauriRuntime()) {
+      if (showResult) {
+        showNotice("info", "请在 Tauri 桌面窗口中刷新账号状态。");
+      }
+      return null;
+    }
+
+    setIsRefreshingAccount(true);
+    try {
+      const raw = await invoke<unknown>("get_account_status");
+      const summary = summarizeAccount(raw);
+      setAccount(summary);
+      if (showResult) {
+        showNotice("success", "账号状态已刷新。");
+      }
+      return summary;
+    } catch (error) {
+      if (showResult) {
+        showNotice("error", String(error));
+      }
+      return null;
+    } finally {
+      setIsRefreshingAccount(false);
     }
   }
 
@@ -214,6 +260,7 @@ function App() {
 
     setIsGenerating(true);
     setNotice(null);
+    const beforeAccount = await refreshAccountStatus(false);
     try {
       const response = await invoke<GenerateImageResponse>("generate_image", { request });
       setActiveImages(response.images);
@@ -229,7 +276,15 @@ function App() {
           ...items,
         ].slice(0, MAX_HISTORY_ITEMS),
       );
-      showNotice("success", `收到 ${response.images.length} 张图，响应类型 ${response.contentType}。`);
+      const afterAccount = await refreshAccountStatus(false);
+      const cost = calculateAccountCost(beforeAccount, afterAccount);
+      setLastCost(cost);
+      showNotice(
+        "success",
+        cost === null
+          ? `收到 ${response.images.length} 张图，响应类型 ${response.contentType}。`
+          : `收到 ${response.images.length} 张图，本次消耗 ${formatPoints(cost)} 点。`,
+      );
     } catch (error) {
       showNotice("error", String(error));
     } finally {
@@ -269,6 +324,13 @@ function App() {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
+  function clearHistory() {
+    setHistory([]);
+    setActiveImages([]);
+    setSelectedImage(0);
+    showNotice("success", "历史记录已清除。");
+  }
+
   function showNotice(type: Notice["type"], message: string) {
     setNotice({ type, message });
   }
@@ -277,7 +339,7 @@ function App() {
     <main className="studio-shell">
       <nav className="nav-rail" aria-label="Main navigation">
         <div className="nav-logo">
-          <img src={appIcon} alt="Novel GUI" />
+          <img src={appIcon} alt="NovelAI GUI" />
         </div>
         <button
           className={activePanel === "generate" ? "nav-button active" : "nav-button"}
@@ -306,7 +368,7 @@ function App() {
             <Sparkles aria-hidden="true" />
           </div>
           <div>
-            <h1>Novel GUI</h1>
+            <h1>NovelAI GUI</h1>
             <p>AI Image Generation</p>
           </div>
         </section>
@@ -365,6 +427,11 @@ function App() {
                 <span>生成后的记录会出现在这里。</span>
               </div>
             ) : (
+              <>
+              <button className="danger-button" onClick={clearHistory} type="button">
+                <Eraser aria-hidden="true" />
+                清除历史记录
+              </button>
               <div className="history-list">
                 {visibleHistory.map((item) => (
                   <button className="history-item" key={item.id} onClick={() => reuse(item)} type="button">
@@ -373,6 +440,7 @@ function App() {
                   </button>
                 ))}
               </div>
+              </>
             )
           ) : null}
         </section>
@@ -381,11 +449,14 @@ function App() {
       <section className="canvas-stage" aria-label="Generated images">
         <header className="stage-card">
           <div>
-            <p className="eyebrow">NovelAI V4.5</p>
-            <h2>AI 图像生成工作台</h2>
+            <h2>生图工作台</h2>
             <span>{currentImage ? `${currentImage.fileName} · ${formatBytes(currentImage.byteLen)}` : "等待生成结果"}</span>
           </div>
           <div className="toolbar-actions">
+            <button className="ghost-button" onClick={() => refreshAccountStatus()} disabled={isRefreshingAccount || !hasToken} type="button">
+              <RefreshCw className={isRefreshingAccount ? "spin" : ""} aria-hidden="true" />
+              刷新
+            </button>
             <button className="ghost-button" onClick={() => setRequest(DEFAULT_REQUEST)} type="button">
               <RotateCcw aria-hidden="true" />
               重置
@@ -481,11 +552,25 @@ function App() {
         <div className="status-bar">
           <span className={isGenerating ? "status-pill busy" : "status-pill ok"}>{isGenerating ? "生成中" : "就绪"}</span>
           <span>API 状态：{hasToken ? "已配置" : "未配置 Token"}</span>
+          <span>账号点数：{formatOptionalPoints(account?.points)}</span>
+          <span>Tier：{account?.tier ?? "未知"}</span>
           {notice ? <strong className={`status-message ${notice.type}`}>{notice.message}</strong> : null}
         </div>
       </section>
 
       <aside className="parameter-rail" aria-label="Generation parameters">
+        <section className="account-card">
+          <div className="section-head">
+            <ShieldCheck aria-hidden="true" />
+            <h2>账号状态</h2>
+          </div>
+          <div className="account-pills" aria-label="Account status">
+            <span>Tier：{account?.tier ?? "未知"}</span>
+            <span>点数：{formatOptionalPoints(account?.points)}</span>
+            <span>本次：{lastCost === null ? "未计算" : formatPoints(lastCost)}</span>
+          </div>
+        </section>
+
         <section className="parameter-card">
           <div className="section-head">
             <Images aria-hidden="true" />
@@ -637,7 +722,6 @@ function App() {
                 <h2>API Token</h2>
                 <i className={hasToken ? "status-dot ok" : "status-dot"} />
               </div>
-              <p className="settings-copy">Token 只通过 Tauri 后端保存到系统凭据，不写入前端本地存储。</p>
               <div className="token-row">
                 <input
                   value={token}
@@ -650,6 +734,23 @@ function App() {
                   保存
                 </button>
               </div>
+            </section>
+
+            <section className="settings-panel">
+              <div className="section-head">
+                <ShieldCheck aria-hidden="true" />
+                <h2>账号状态</h2>
+              </div>
+              <div className="account-grid">
+                <span>Tier<strong>{account?.tier ?? "未知"}</strong></span>
+                <span>点数<strong>{formatOptionalPoints(account?.points)}</strong></span>
+                <span>订阅<strong>{account?.active === undefined ? "未知" : account.active ? "有效" : "无效"}</strong></span>
+                <span>本次消耗<strong>{lastCost === null ? "未计算" : formatPoints(lastCost)}</strong></span>
+              </div>
+              <button className="ghost-button wide-button" onClick={() => refreshAccountStatus()} disabled={isRefreshingAccount || !hasToken} type="button">
+                <RefreshCw className={isRefreshingAccount ? "spin" : ""} aria-hidden="true" />
+                刷新账号状态
+              </button>
             </section>
 
             <section className="settings-panel">
@@ -861,6 +962,130 @@ function buildPayloadPreview(request: ImageRequest) {
 
 function isV4ImageModel(model: string) {
   return model.includes("diffusion-4");
+}
+
+function summarizeAccount(raw: unknown): AccountSummary {
+  return {
+    tier: normalizeTier(findStringByKeys(raw, ["tier", "subscriptionTier", "plan", "accountTier", "accountType"])),
+    points: extractAnlasPoints(raw),
+    active: findBooleanByKeys(raw, ["active", "subscriptionActive", "isActive"]),
+    expiresAt: findNumberByKeys(raw, ["expiresAt", "expires_at", "expirationTime"]),
+    raw,
+  };
+}
+
+function extractAnlasPoints(raw: unknown) {
+  const direct = findNumberByKeys(raw, ["trainingStepsLeft", "anlas", "anlasBalance", "points"]);
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  const fixed = findNumberByKeys(raw, ["fixedTrainingStepsLeft", "fixedAnlas"]);
+  const purchased = findNumberByKeys(raw, ["purchasedTrainingSteps", "purchasedAnlas"]);
+  if (fixed !== undefined || purchased !== undefined) {
+    return (fixed ?? 0) + (purchased ?? 0);
+  }
+
+  return undefined;
+}
+
+function normalizeTier(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  const map: Record<string, string> = {
+    "0": "Paper",
+    "1": "Tablet",
+    "2": "Scroll",
+    "3": "Opus",
+  };
+  return map[value] ?? value;
+}
+
+function calculateAccountCost(before: AccountSummary | null, after: AccountSummary | null) {
+  if (before?.points === undefined || after?.points === undefined) {
+    return null;
+  }
+
+  const diff = before.points - after.points;
+  if (!Number.isFinite(diff) || diff < 0) {
+    return null;
+  }
+
+  return diff;
+}
+
+function formatOptionalPoints(value?: number) {
+  return value === undefined ? "未知" : formatPoints(value);
+}
+
+function formatPoints(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function findStringByKeys(value: unknown, keys: string[]): string | undefined {
+  const found = findByKeys(value, keys);
+  if (typeof found === "string" && found.trim()) {
+    return found;
+  }
+  if (typeof found === "number" && Number.isFinite(found)) {
+    return String(found);
+  }
+  return undefined;
+}
+
+function findNumberByKeys(value: unknown, keys: string[]): number | undefined {
+  for (const found of findAllByKeys(value, keys)) {
+    if (typeof found === "number" && Number.isFinite(found)) {
+      return found;
+    }
+    if (typeof found === "string") {
+      const parsed = Number(found);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return undefined;
+}
+
+function findBooleanByKeys(value: unknown, keys: string[]): boolean | undefined {
+  const found = findByKeys(value, keys);
+  return typeof found === "boolean" ? found : undefined;
+}
+
+function findByKeys(value: unknown, keys: string[]): unknown {
+  return findAllByKeys(value, keys)[0];
+}
+
+function findAllByKeys(value: unknown, keys: string[]): unknown[] {
+  const keySet = new Set(keys.map((key) => key.toLowerCase()));
+  const queue: unknown[] = [value];
+  const matches: unknown[] = [];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object") {
+      continue;
+    }
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    for (const [key, child] of Object.entries(current as Record<string, unknown>)) {
+      if (keySet.has(key.toLowerCase())) {
+        matches.push(child);
+      }
+      if (child && typeof child === "object") {
+        queue.push(child);
+      }
+    }
+  }
+
+  return matches;
 }
 
 function clampHistoryLimit(value: number) {

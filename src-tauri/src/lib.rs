@@ -9,6 +9,7 @@ use std::path::PathBuf;
 const SERVICE_NAME: &str = "novel-gui";
 const ACCOUNT_NAME: &str = "novelai-api-token";
 const GENERATE_IMAGE_URL: &str = "https://image.novelai.net/ai/generate-image";
+const USER_DATA_URL: &str = "https://api.novelai.net/user/data";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,13 +174,34 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
 }
 
 #[tauri::command]
+async fn get_account_status() -> Result<serde_json::Value, String> {
+    let token = read_token()?;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(USER_DATA_URL)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(to_error)?;
+
+    let status = response.status();
+    let body = response.bytes().await.map_err(to_error)?.to_vec();
+
+    if !status.is_success() {
+        return Err(format_api_error(status.as_u16(), &body));
+    }
+
+    serde_json::from_slice(&body).map_err(to_error)
+}
+
+#[tauri::command]
 fn save_generated_image(file_name: String, base64: String) -> Result<String, String> {
     let bytes = BASE64.decode(base64).map_err(to_error)?;
     let safe_name = sanitize_file_name(&file_name);
     let mut dir = dirs::picture_dir()
         .or_else(dirs::download_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    dir.push("Novel GUI");
+    dir.push("NovelAI GUI");
     fs::create_dir_all(&dir).map_err(to_error)?;
     dir.push(safe_name);
     fs::write(&dir, bytes).map_err(to_error)?;
@@ -346,6 +368,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             has_api_token,
             save_api_token,
+            get_account_status,
             generate_image,
             save_generated_image
         ])
