@@ -83,16 +83,22 @@ h2 {
 }
 
 .nav-rail {
+  position: sticky;
+  top: 50%;
+  z-index: 2;
+  align-self: start;
+  justify-self: center;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  min-height: calc(100vh - 28px);
+  min-height: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
   padding: 12px 8px;
   box-shadow: var(--shadow);
+  transform: translateY(-50%);
 }
 
 .nav-logo,
@@ -1019,8 +1025,10 @@ select:focus {
   }
 
   .nav-rail {
+    position: static;
     flex-direction: row;
     min-height: auto;
+    transform: none;
   }
 
   .nav-spacer {
