@@ -1102,45 +1102,45 @@ function App() {
     if ((imported.characters ?? []).length > 0) {
       setCharacterOpen(true);
     }
-    showNotice("success", "已从 PNG 元数据导入 prompt 和生成参数。");
-    writeAppLog("success", "png-import", `已导入 ${fileName} 的 PNG 元数据。`);
+    showNotice("success", "已从图片元数据导入 prompt 和生成参数。");
+    writeAppLog("success", "image-import", `已导入 ${fileName} 的图片元数据。`);
   }
 
-  function reportMissingPngMetadata(file: File, imported: ImportedImageMetadata) {
-    const message = `PNG 中没有识别到 NovelAI prompt。文本块：${imported.textChunkKeywords.join(", ") || "无"}。`;
+  function reportMissingImageMetadata(file: File, imported: ImportedImageMetadata) {
+    const message = `图片中没有识别到 NovelAI prompt。元数据块：${imported.textChunkKeywords.join(", ") || "无"}。`;
     showNotice("info", message);
     writeAppLog(
       "warning",
-      "png-import",
-      `${file.name} 没有识别到 NovelAI prompt。text_chunks=${imported.textChunkCount} keywords=${imported.textChunkKeywords.join("|")}`,
+      "image-import",
+      `${file.name} 没有识别到 NovelAI prompt。metadata_chunks=${imported.textChunkCount} keywords=${imported.textChunkKeywords.join("|")}`,
     );
   }
 
-  async function importPngFile(file: File) {
+  async function importImageMetadataFile(file: File) {
     try {
-      const imported = await parseNovelAiPngMetadata(await file.arrayBuffer());
+      const imported = await parseNovelAiImageMetadata(await file.arrayBuffer());
       if (!hasNovelAiMetadata(imported)) {
-        reportMissingPngMetadata(file, imported);
+        reportMissingImageMetadata(file, imported);
         return;
       }
 
       applyImportedMetadata(imported, file.name);
     } catch (error) {
-      const message = `解析 PNG 元数据失败：${String(error)}`;
+      const message = `解析图片元数据失败：${String(error)}`;
       showNotice("error", message);
-      writeAppLog("error", "png-import", message);
+      writeAppLog("error", "image-import", message);
     }
   }
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
-      const file = findPngFileFromClipboard(event.clipboardData);
+      const file = findMetadataImageFileFromClipboard(event.clipboardData);
       if (!file) {
         return;
       }
 
       event.preventDefault();
-      void importPngFile(file);
+      void importImageMetadataFile(file);
     };
 
     window.addEventListener("paste", handlePaste);
@@ -1153,7 +1153,7 @@ function App() {
     const file = event.target.files?.[0] ?? null;
     event.target.value = "";
     if (file) {
-      await importPngFile(file);
+      await importImageMetadataFile(file);
     }
   }
 
@@ -1182,7 +1182,7 @@ function App() {
     <main className="studio-shell">
       <input
         ref={importInputRef}
-        accept="image/png"
+        accept="image/png,image/webp"
         aria-hidden="true"
         className="hidden-file-input"
         onChange={handleImportInput}
@@ -3433,11 +3433,8 @@ function sortHistory(history: HistoryItem[]) {
   return [...history].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-async function parseNovelAiPngMetadata(buffer: ArrayBuffer): Promise<ImportedImageMetadata> {
-  const chunks = [
-    ...readPngTextChunks(buffer),
-    ...(await readStealthPngTextChunks(buffer)),
-  ];
+async function parseNovelAiImageMetadata(buffer: ArrayBuffer): Promise<ImportedImageMetadata> {
+  const chunks = await readImageMetadataChunks(buffer);
   const texts = new Map<string, string>();
 
   for (const chunk of chunks) {
@@ -3453,6 +3450,7 @@ async function parseNovelAiPngMetadata(buffer: ArrayBuffer): Promise<ImportedIma
   ].filter(Boolean) as string[];
 
   const parsedObjects: unknown[] = [];
+  const parsedJsonTexts = new Set<string>();
   for (const value of rawCandidates) {
     const trimmed = value.trim();
     if (!trimmed) {
@@ -3462,8 +3460,21 @@ async function parseNovelAiPngMetadata(buffer: ArrayBuffer): Promise<ImportedIma
     if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
       try {
         parsedObjects.push(JSON.parse(trimmed));
+        parsedJsonTexts.add(trimmed);
       } catch {
         // keep going with raw text candidates
+      }
+    }
+
+    for (const jsonText of extractJsonCandidatesFromText(trimmed)) {
+      if (parsedJsonTexts.has(jsonText)) {
+        continue;
+      }
+      try {
+        parsedObjects.push(JSON.parse(jsonText));
+        parsedJsonTexts.add(jsonText);
+      } catch {
+        // keep going with other embedded candidates
       }
     }
   }
@@ -3666,6 +3677,60 @@ function parseNegativePromptFromMetadataStrings(values: string[]) {
   return undefined;
 }
 
+function extractJsonCandidatesFromText(text: string) {
+  const candidates: string[] = [];
+  const stack: string[] = [];
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{" || char === "[") {
+      if (stack.length === 0) {
+        start = index;
+      }
+      stack.push(char);
+      continue;
+    }
+
+    if (char !== "}" && char !== "]") {
+      continue;
+    }
+
+    const open = stack.pop();
+    if ((char === "}" && open !== "{") || (char === "]" && open !== "[")) {
+      stack.length = 0;
+      start = -1;
+      continue;
+    }
+
+    if (stack.length === 0 && start >= 0) {
+      candidates.push(text.slice(start, index + 1));
+      start = -1;
+    }
+  }
+
+  return candidates;
+}
+
 function parseNovelAiModelFromSource(source?: string) {
   if (!source) {
     return undefined;
@@ -3687,7 +3752,7 @@ function parseNovelAiModelFromSource(source?: string) {
   return undefined;
 }
 
-function findPngFileFromClipboard(data: DataTransfer | null) {
+function findMetadataImageFileFromClipboard(data: DataTransfer | null) {
   if (!data) {
     return null;
   }
@@ -3698,31 +3763,37 @@ function findPngFileFromClipboard(data: DataTransfer | null) {
     }
 
     const file = item.getAsFile();
-    if (file && isPngFile(file)) {
-      return ensureNamedClipboardFile(file);
+    if (file && isMetadataImageFile(file)) {
+      return ensureNamedClipboardImageFile(file);
     }
   }
 
   for (const file of Array.from(data.files)) {
-    if (isPngFile(file)) {
-      return ensureNamedClipboardFile(file);
+    if (isMetadataImageFile(file)) {
+      return ensureNamedClipboardImageFile(file);
     }
   }
 
   return null;
 }
 
-function isPngFile(file: File) {
-  return file.type === "image/png" || file.name.toLowerCase().endsWith(".png");
+function isMetadataImageFile(file: File) {
+  const name = file.name.toLowerCase();
+  return file.type === "image/png" ||
+    file.type === "image/webp" ||
+    name.endsWith(".png") ||
+    name.endsWith(".webp");
 }
 
-function ensureNamedClipboardFile(file: File) {
+function ensureNamedClipboardImageFile(file: File) {
   if (file.name) {
     return file;
   }
 
-  return new File([file], "clipboard.png", {
-    type: file.type || "image/png",
+  const mimeType = file.type || "image/png";
+  const extension = mimeType === "image/webp" ? "webp" : "png";
+  return new File([file], `clipboard.${extension}`, {
+    type: mimeType,
     lastModified: file.lastModified || Date.now(),
   });
 }
@@ -3765,6 +3836,32 @@ function findNestedCaptionText(sources: unknown[], key: string) {
   }
 
   return undefined;
+}
+
+async function readImageMetadataChunks(buffer: ArrayBuffer): Promise<PngTextChunk[]> {
+  if (isPngBuffer(buffer)) {
+    return [
+      ...readPngTextChunks(buffer),
+      ...(await readStealthPngTextChunks(buffer)),
+    ];
+  }
+
+  if (isWebpBuffer(buffer)) {
+    return readWebpMetadataChunks(buffer);
+  }
+
+  throw new Error("仅支持 PNG 和 WebP 图片元数据导入");
+}
+
+function isPngBuffer(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  return signature.every((value, index) => bytes[index] === value);
+}
+
+function isWebpBuffer(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  return bytes.length >= 12 && readAscii(bytes, 0, 4) === "RIFF" && readAscii(bytes, 8, 4) === "WEBP";
 }
 
 function readPngTextChunks(buffer: ArrayBuffer): PngTextChunk[] {
@@ -3896,6 +3993,249 @@ function readPngRasterInfo(buffer: ArrayBuffer) {
   }
 
   return { width, height, bitDepth, colorType, idatChunks };
+}
+
+function readWebpMetadataChunks(buffer: ArrayBuffer): PngTextChunk[] {
+  const bytes = new Uint8Array(buffer);
+  if (!isWebpBuffer(buffer)) {
+    return [];
+  }
+
+  const chunks: PngTextChunk[] = [];
+  let offset = 12;
+
+  while (offset + 8 <= bytes.length) {
+    const type = readAscii(bytes, offset, 4);
+    const length = readUint32Le(bytes, offset + 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd > bytes.length) {
+      break;
+    }
+
+    const data = readBytes(bytes, dataStart, length);
+    if (type === "EXIF") {
+      chunks.push(...readExifMetadataChunks(data));
+    } else if (type === "XMP ") {
+      const text = decodeText(data);
+      chunks.push({ keyword: "xmp", text });
+      chunks.push(...parseTextMetadataObjectChunks(text));
+    }
+
+    offset = dataEnd + (length % 2);
+  }
+
+  return dedupeMetadataChunks(chunks);
+}
+
+function readExifMetadataChunks(data: Uint8Array): PngTextChunk[] {
+  const tiffStart = startsWithAscii(data, 0, "Exif\0\0") ? 6 : 0;
+  const chunks = parseTiffExifChunks(data, tiffStart);
+  chunks.push(...extractPrintableMetadataChunks(data, "exif"));
+  return dedupeMetadataChunks(chunks);
+}
+
+function parseTiffExifChunks(data: Uint8Array, tiffStart: number): PngTextChunk[] {
+  if (tiffStart + 8 > data.length) {
+    return [];
+  }
+
+  const littleEndian = readAscii(data, tiffStart, 2) === "II";
+  const bigEndian = readAscii(data, tiffStart, 2) === "MM";
+  if (!littleEndian && !bigEndian) {
+    return [];
+  }
+
+  const magic = readUint16Endian(data, tiffStart + 2, littleEndian);
+  if (magic !== 42) {
+    return [];
+  }
+
+  const firstIfdOffset = readUint32Endian(data, tiffStart + 4, littleEndian);
+  const visited = new Set<number>();
+  const chunks: PngTextChunk[] = [];
+
+  function parseIfd(relativeOffset: number) {
+    if (!relativeOffset || visited.has(relativeOffset)) {
+      return;
+    }
+
+    visited.add(relativeOffset);
+    const ifdOffset = tiffStart + relativeOffset;
+    if (ifdOffset + 2 > data.length) {
+      return;
+    }
+
+    const count = readUint16Endian(data, ifdOffset, littleEndian);
+    const entriesStart = ifdOffset + 2;
+    for (let index = 0; index < count; index += 1) {
+      const entryOffset = entriesStart + index * 12;
+      if (entryOffset + 12 > data.length) {
+        return;
+      }
+
+      const tag = readUint16Endian(data, entryOffset, littleEndian);
+      const type = readUint16Endian(data, entryOffset + 2, littleEndian);
+      const itemCount = readUint32Endian(data, entryOffset + 4, littleEndian);
+      const valueOffset = entryValueOffset(data, tiffStart, entryOffset, type, itemCount, littleEndian);
+      const byteLength = exifTypeByteLength(type) * itemCount;
+      if (valueOffset < 0 || byteLength <= 0 || valueOffset + byteLength > data.length) {
+        continue;
+      }
+
+      if (tag === 0x8769) {
+        parseIfd(readUint32Endian(data, valueOffset, littleEndian));
+        continue;
+      }
+
+      const keyword = exifTagKeyword(tag);
+      if (!keyword) {
+        continue;
+      }
+
+      const value = decodeExifValue(data.slice(valueOffset, valueOffset + byteLength), type, tag);
+      if (value) {
+        chunks.push({ keyword, text: value });
+      }
+    }
+
+    const nextOffsetPosition = entriesStart + count * 12;
+    if (nextOffsetPosition + 4 <= data.length) {
+      parseIfd(readUint32Endian(data, nextOffsetPosition, littleEndian));
+    }
+  }
+
+  parseIfd(firstIfdOffset);
+  return chunks;
+}
+
+function entryValueOffset(
+  data: Uint8Array,
+  tiffStart: number,
+  entryOffset: number,
+  type: number,
+  itemCount: number,
+  littleEndian: boolean,
+) {
+  const byteLength = exifTypeByteLength(type) * itemCount;
+  if (byteLength <= 4) {
+    return entryOffset + 8;
+  }
+
+  return tiffStart + readUint32Endian(data, entryOffset + 8, littleEndian);
+}
+
+function exifTypeByteLength(type: number) {
+  if (type === 1 || type === 2 || type === 7) {
+    return 1;
+  }
+  if (type === 3) {
+    return 2;
+  }
+  if (type === 4 || type === 9) {
+    return 4;
+  }
+  if (type === 5 || type === 10) {
+    return 8;
+  }
+  return 0;
+}
+
+function exifTagKeyword(tag: number) {
+  if (tag === 0x010e) {
+    return "Description";
+  }
+  if (tag === 0x0131) {
+    return "Software";
+  }
+  if (tag === 0x9286) {
+    return "Comment";
+  }
+  return undefined;
+}
+
+function decodeExifValue(value: Uint8Array, type: number, tag: number) {
+  if (tag === 0x9286) {
+    return decodeExifUserComment(value);
+  }
+  if (type === 2 || type === 7 || type === 1) {
+    return trimMetadataText(decodeText(value));
+  }
+  return undefined;
+}
+
+function decodeExifUserComment(value: Uint8Array) {
+  const prefix = decodeLatin1(value.slice(0, Math.min(8, value.length)));
+  if (prefix.startsWith("UNICODE")) {
+    return trimMetadataText(decodeUtf16Be(value.slice(8)));
+  }
+  if (prefix.startsWith("ASCII")) {
+    return trimMetadataText(decodeText(value.slice(8)));
+  }
+  return trimMetadataText(decodeText(value));
+}
+
+function extractPrintableMetadataChunks(data: Uint8Array, prefix: string): PngTextChunk[] {
+  const text = decodeText(data);
+  const candidates = text.match(/[\x20-\x7e\t\r\n]{24,}/g) ?? [];
+  const chunks: PngTextChunk[] = [];
+
+  for (const [index, candidate] of candidates.entries()) {
+    const trimmed = trimMetadataText(candidate);
+    if (!trimmed || !looksLikeUsefulMetadata(trimmed)) {
+      continue;
+    }
+    chunks.push({ keyword: `${prefix}-${index + 1}`, text: trimmed });
+    chunks.push(...parseTextMetadataObjectChunks(trimmed));
+  }
+
+  return chunks;
+}
+
+function parseTextMetadataObjectChunks(text: string): PngTextChunk[] {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return [];
+    }
+
+    return Object.entries(parsed as Record<string, unknown>)
+      .filter(([, value]) => typeof value === "string")
+      .map(([keyword, value]) => ({ keyword, text: value as string }));
+  } catch {
+    return [];
+  }
+}
+
+function looksLikeUsefulMetadata(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("novelai") ||
+    lower.includes("prompt") ||
+    lower.includes("description") ||
+    lower.includes("uc") ||
+    lower.includes("v4_prompt") ||
+    lower.includes("nai-diffusion");
+}
+
+function trimMetadataText(value: string) {
+  return value.replace(/\0/g, "").trim();
+}
+
+function dedupeMetadataChunks(chunks: PngTextChunk[]) {
+  const seen = new Set<string>();
+  return chunks.filter((chunk) => {
+    const key = `${chunk.keyword}\0${chunk.text}`;
+    if (!chunk.text.trim() || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 async function extractStealthPngPayload(
@@ -4144,6 +4484,25 @@ function readUint32(bytes: Uint8Array, offset: number) {
   ) >>> 0;
 }
 
+function readUint32Le(bytes: Uint8Array, offset: number) {
+  return (
+    bytes[offset] |
+    (bytes[offset + 1] << 8) |
+    (bytes[offset + 2] << 16) |
+    (bytes[offset + 3] << 24)
+  ) >>> 0;
+}
+
+function readUint16Endian(bytes: Uint8Array, offset: number, littleEndian: boolean) {
+  return littleEndian
+    ? bytes[offset] | (bytes[offset + 1] << 8)
+    : (bytes[offset] << 8) | bytes[offset + 1];
+}
+
+function readUint32Endian(bytes: Uint8Array, offset: number, littleEndian: boolean) {
+  return littleEndian ? readUint32Le(bytes, offset) : readUint32(bytes, offset);
+}
+
 function readBytes(bytes: Uint8Array, offset: number, length: number) {
   return bytes.slice(offset, offset + length);
 }
@@ -4152,12 +4511,34 @@ function readAscii(bytes: Uint8Array, offset: number, length: number) {
   return String.fromCharCode(...bytes.slice(offset, offset + length));
 }
 
+function startsWithAscii(bytes: Uint8Array, offset: number, value: string) {
+  if (offset + value.length > bytes.length) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (bytes[offset + index] !== value.charCodeAt(index)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function decodeText(bytes: Uint8Array) {
   try {
     return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } catch {
     return String.fromCharCode(...bytes);
   }
+}
+
+function decodeUtf16Be(bytes: Uint8Array) {
+  const codeUnits: number[] = [];
+  for (let index = 0; index + 1 < bytes.length; index += 2) {
+    codeUnits.push((bytes[index] << 8) | bytes[index + 1]);
+  }
+  return String.fromCharCode(...codeUnits);
 }
 
 function indexOfZero(bytes: Uint8Array, start: number) {
