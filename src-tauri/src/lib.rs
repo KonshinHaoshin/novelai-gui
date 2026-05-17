@@ -80,6 +80,10 @@ pub struct ImageGenerateRequest {
     pub director_reference_secondary_strength: Option<f32>,
     #[serde(default)]
     pub director_reference_information_extracted: Option<f32>,
+    #[serde(default)]
+    pub allow_invalid_tls: bool,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +125,10 @@ pub struct UpscaleImageRequest {
     pub width: u32,
     pub height: u32,
     pub scale: u32,
+    #[serde(default)]
+    pub allow_invalid_tls: bool,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +140,10 @@ pub struct AugmentImageRequest {
     pub height: u32,
     pub req_type: String,
     pub defry: u32,
+    #[serde(default)]
+    pub allow_invalid_tls: bool,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +152,10 @@ pub struct EncodeVibeRequest {
     pub image: String,
     pub model: String,
     pub information_extracted: f32,
+    #[serde(default)]
+    pub allow_invalid_tls: bool,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 #[tauri::command]
@@ -170,6 +186,7 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
     }
 
     let token = read_token()?;
+    let api_model = effective_image_model(&request.model, &request.action);
     let mut parameters = serde_json::json!({
         "width": request.width,
         "height": request.height,
@@ -192,7 +209,7 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
         "prefer_brownian": request.prefer_brownian,
     });
 
-    if is_v4_image_model(&request.model) {
+    if is_v4_image_model(&api_model) {
         let character_captions = build_character_captions(&request.characters);
         let use_coords = request.use_character_coords && !character_captions.is_empty();
         parameters["legacy"] = serde_json::json!(false);
@@ -288,11 +305,11 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
 
     let payload = serde_json::json!({
         "input": request.prompt,
-        "model": request.model,
+        "model": api_model,
         "action": request.action,
         "parameters": parameters,
     });
-    let client = reqwest::Client::new();
+    let client = api_client(request.allow_invalid_tls, request.proxy_url.as_deref())?;
     let response = client
         .post(GENERATE_IMAGE_URL)
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -322,9 +339,9 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
 }
 
 #[tauri::command]
-async fn get_account_status() -> Result<serde_json::Value, String> {
+async fn get_account_status(allow_invalid_tls: bool, proxy_url: Option<String>) -> Result<serde_json::Value, String> {
     let token = read_token()?;
-    let client = reqwest::Client::new();
+    let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
     let data = get_json(&client, &token, USER_DATA_URL).await?;
     let information = get_json(&client, &token, USER_INFORMATION_URL).await.ok();
     let subscription = get_json(&client, &token, USER_SUBSCRIPTION_URL).await.ok();
@@ -337,9 +354,9 @@ async fn get_account_status() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn suggest_tags(model: String, prompt: String, lang: Option<String>) -> Result<serde_json::Value, String> {
+async fn suggest_tags(model: String, prompt: String, lang: Option<String>, allow_invalid_tls: bool, proxy_url: Option<String>) -> Result<serde_json::Value, String> {
     let token = read_token()?;
-    let client = reqwest::Client::new();
+    let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
     let response = client
         .get(SUGGEST_TAGS_URL)
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -368,7 +385,7 @@ async fn upscale_image(request: UpscaleImageRequest) -> Result<GenerateImageResp
         "height": request.height,
         "scale": request.scale,
     });
-    post_zip_like(UPSCALE_IMAGE_URL, &token, payload).await
+    post_zip_like(UPSCALE_IMAGE_URL, &token, payload, request.allow_invalid_tls, request.proxy_url.as_deref()).await
 }
 
 #[tauri::command]
@@ -382,7 +399,7 @@ async fn augment_image(request: AugmentImageRequest) -> Result<GenerateImageResp
         "req_type": request.req_type,
         "defry": request.defry,
     });
-    post_zip_like(AUGMENT_IMAGE_URL, &token, payload).await
+    post_zip_like(AUGMENT_IMAGE_URL, &token, payload, request.allow_invalid_tls, request.proxy_url.as_deref()).await
 }
 
 #[tauri::command]
@@ -394,7 +411,7 @@ async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, String> {
         "information_extracted": request.information_extracted,
         "crop_to_mask": false,
     });
-    let client = reqwest::Client::new();
+    let client = api_client(request.allow_invalid_tls, request.proxy_url.as_deref())?;
     let response = client
         .post(ENCODE_VIBE_URL)
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -489,8 +506,10 @@ async fn post_zip_like(
     url: &str,
     token: &str,
     payload: serde_json::Value,
+    allow_invalid_tls: bool,
+    proxy_url: Option<&str>,
 ) -> Result<GenerateImageResponse, String> {
-    let client = reqwest::Client::new();
+    let client = api_client(allow_invalid_tls, proxy_url)?;
     let response = client
         .post(url)
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -516,6 +535,14 @@ async fn post_zip_like(
         content_type: content_type.clone(),
         images: decode_generated_images(&content_type, body)?,
     })
+}
+
+fn api_client(allow_invalid_tls: bool, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().danger_accept_invalid_certs(allow_invalid_tls);
+    if let Some(url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
+        builder = builder.proxy(reqwest::Proxy::all(url).map_err(to_error)?);
+    }
+    builder.build().map_err(to_error)
 }
 
 fn build_character_captions(characters: &[CharacterPrompt]) -> Vec<CharacterCaptionPayload> {
@@ -706,6 +733,25 @@ fn to_error(error: impl std::fmt::Display) -> String {
 
 fn is_v4_image_model(model: &str) -> bool {
     model.contains("diffusion-4")
+}
+
+fn effective_image_model(model: &str, action: &str) -> String {
+    if action != "infill" || model.contains("inpainting") {
+        return model.to_string();
+    }
+
+    match model {
+        "nai-diffusion-4-5-full" => "nai-diffusion-4-5-full-inpainting",
+        "nai-diffusion-4-5-curated" => "nai-diffusion-4-5-curated-inpainting",
+        "nai-diffusion-4-full" => "nai-diffusion-4-full-inpainting",
+        "nai-diffusion-4-curated-preview" => "nai-diffusion-4-curated-preview-inpainting",
+        "nai-diffusion-3" => "nai-diffusion-3-inpainting",
+        "nai-diffusion" => "nai-diffusion-inpainting",
+        "safe-diffusion" => "safe-diffusion-inpainting",
+        "nai-diffusion-furry" => "furry-diffusion-inpainting",
+        _ => model,
+    }
+    .to_string()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
