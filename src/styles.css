@@ -80,7 +80,8 @@ h2 {
 .prompt-rail,
 .canvas-stage,
 .parameter-rail,
-.prompt-library-page {
+.prompt-library-page,
+.favorites-page {
   min-width: 0;
 }
 
@@ -180,7 +181,8 @@ h2 {
   padding-right: 2px;
 }
 
-.settings-page {
+.settings-page,
+.favorites-page {
   grid-column: 2 / 5;
   display: flex;
   flex-direction: column;
@@ -586,7 +588,7 @@ select:focus {
 
 .prompt-library-search {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 38px;
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
   align-items: center;
   gap: 8px;
 }
@@ -792,6 +794,12 @@ select:focus {
   border-color: var(--accent);
   background: var(--accent);
   color: #ffffff;
+}
+
+.icon-button.favorite.active {
+  border-color: #ef8da5;
+  background: #fff0f4;
+  color: #c83d68;
 }
 
 .danger-button {
@@ -1375,6 +1383,82 @@ select:focus {
   min-height: 72px;
 }
 
+.favorites-panel {
+  width: min(1120px, 100%);
+}
+
+.favorites-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+}
+
+.favorite-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.favorite-image {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 0;
+  background: #eef1f5;
+  padding: 0;
+  overflow: hidden;
+}
+
+.favorite-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.favorite-info {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.favorite-info strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.favorite-info span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.favorite-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.favorite-actions .icon-button {
+  flex: 1 1 0;
+  width: auto;
+}
+
+.favorites-empty {
+  min-height: 220px;
+}
+
 .mini-empty {
   min-height: 104px;
   border: 1px dashed var(--line-strong);
@@ -1444,7 +1528,8 @@ select:focus {
   }
 
   .prompt-library-page,
-  .settings-page {
+  .settings-page,
+  .favorites-page {
     grid-column: 2 / 4;
   }
 
@@ -1473,12 +1558,14 @@ select:focus {
   .canvas-stage,
   .parameter-rail,
   .prompt-library-page,
-  .settings-page {
+  .settings-page,
+  .favorites-page {
     min-height: auto;
   }
 
   .prompt-library-page,
-  .settings-page {
+  .settings-page,
+  .favorites-page {
     grid-column: auto;
   }
 

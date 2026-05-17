@@ -5,6 +5,7 @@ import {
   Copy,
   Download,
   Eraser,
+  Heart,
   History,
   Images,
   ImagePlus,
@@ -106,6 +107,13 @@ type HistoryItem = {
   createdAt: string;
   request: ImageRequest;
   images: GeneratedImage[];
+};
+
+type FavoriteItem = {
+  id: string;
+  createdAt: string;
+  request: ImageRequest;
+  image: GeneratedImage;
 };
 
 type PersistedHistoryItem = {
@@ -211,9 +219,10 @@ type PromptLibraryCacheRecord = {
 const HISTORY_KEY = "novelai-gui-history";
 const SETTINGS_KEY = "novelai-gui-settings";
 const HISTORY_DB_NAME = "novelai-gui";
-const HISTORY_DB_VERSION = 2;
+const HISTORY_DB_VERSION = 3;
 const HISTORY_STORE_NAME = "history";
 const PROMPT_LIBRARY_STORE_NAME = "prompt-library";
+const FAVORITES_STORE_NAME = "favorites";
 const MAX_HISTORY_ITEMS = 40;
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -312,6 +321,7 @@ const SIZE_PRESETS = [
 function App() {
   const [request, setRequest] = useState<ImageRequest>(DEFAULT_REQUEST);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
   const [activeImages, setActiveImages] = useState<GeneratedImage[]>([]);
   const [selectedImage, setSelectedImage] = useState(0);
   const [token, setToken] = useState("");
@@ -322,12 +332,13 @@ function App() {
   const [apiToolsOpen, setApiToolsOpen] = useState(true);
   const [characterOpen, setCharacterOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [activePanel, setActivePanel] = useState<"generate" | "promptLibrary" | "settings">("generate");
+  const [activePanel, setActivePanel] = useState<"generate" | "promptLibrary" | "settings" | "favorites">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [isRefreshingAccount, setIsRefreshingAccount] = useState(false);
   const [lastCost, setLastCost] = useState<number | null>(null);
   const [historyReady, setHistoryReady] = useState(false);
+  const [favoritesReady, setFavoritesReady] = useState(false);
   const [promptLibraryType, setPromptLibraryType] = useState<PromptEntryType>("style");
   const [promptLibraryQuery, setPromptLibraryQuery] = useState("");
   const [promptLibraryResults, setPromptLibraryResults] = useState<PromptLibraryEntry[]>([]);
@@ -384,6 +395,17 @@ function App() {
   }, [history, historyReady]);
 
   useEffect(() => {
+    if (!favoritesReady) {
+      return;
+    }
+
+    void saveFavoritesToIndexedDb(favorites).catch((error) => {
+      console.error(error);
+      setNotice({ type: "error", message: "收藏写入失败，请稍后重试。" });
+    });
+  }, [favorites, favoritesReady]);
+
+  useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
 
@@ -397,6 +419,23 @@ function App() {
       }
       setHistory(loaded);
       setHistoryReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const loaded = await loadFavoritesFromIndexedDb();
+      if (cancelled) {
+        return;
+      }
+      setFavorites(loaded);
+      setFavoritesReady(true);
     })();
 
     return () => {
@@ -579,6 +618,50 @@ function App() {
       showNotice("error", `复制图片失败：${message}`);
       writeAppLog("error", "copy-image", message);
     }
+  }
+
+  function isImageFavorited(image?: GeneratedImage) {
+    if (!image) {
+      return false;
+    }
+    return favorites.some((item) => item.image.base64 === image.base64);
+  }
+
+  function toggleFavorite(image: GeneratedImage) {
+    const existing = favorites.find((item) => item.image.base64 === image.base64);
+    if (existing) {
+      setFavorites((items) => items.filter((item) => item.id !== existing.id));
+      showNotice("info", "已取消收藏。");
+      return;
+    }
+
+    const sourceHistory = history.find((item) =>
+      item.images.some((historyImage) => historyImage.base64 === image.base64),
+    );
+
+    setFavorites((items) => [
+      {
+        id: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        request: sourceHistory?.request ?? request,
+        image,
+      },
+      ...items,
+    ]);
+    showNotice("success", "已加入收藏。");
+  }
+
+  function openFavorite(item: FavoriteItem) {
+    setRequest(normalizeImageRequest(item.request));
+    setActiveImages([item.image]);
+    setSelectedImage(0);
+    setActivePanel("generate");
+    showNotice("info", "已打开收藏图片。");
+  }
+
+  function removeFavorite(id: string) {
+    setFavorites((items) => items.filter((item) => item.id !== id));
+    showNotice("info", "已移除收藏。");
   }
 
   async function suggestPromptTags() {
@@ -1035,7 +1118,7 @@ function App() {
 
   async function importPngFile(file: File) {
     try {
-      const imported = parseNovelAiPngMetadata(await file.arrayBuffer());
+      const imported = await parseNovelAiPngMetadata(await file.arrayBuffer());
       if (!hasNovelAiMetadata(imported)) {
         reportMissingPngMetadata(file, imported);
         return;
@@ -1048,6 +1131,23 @@ function App() {
       writeAppLog("error", "png-import", message);
     }
   }
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const file = findPngFileFromClipboard(event.clipboardData);
+      if (!file) {
+        return;
+      }
+
+      event.preventDefault();
+      void importPngFile(file);
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+    };
+  });
 
   async function handleImportInput(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
@@ -1152,6 +1252,14 @@ function App() {
           type="button"
         >
           <Settings2 aria-hidden="true" />
+        </button>
+        <button
+          className={activePanel === "favorites" ? "nav-button active" : "nav-button"}
+          onClick={() => setActivePanel("favorites")}
+          title="收藏画廊"
+          type="button"
+        >
+          <Heart aria-hidden="true" />
         </button>
         <div className="nav-spacer" />
       </nav>
@@ -1281,6 +1389,15 @@ function App() {
           <footer className="preview-footer">
             <span>{currentImage ? formatBytes(currentImage.byteLen) : "未生成"}</span>
             <div className="result-actions">
+              <button
+                className={currentImage && isImageFavorited(currentImage) ? "icon-button favorite active" : "icon-button favorite"}
+                disabled={!currentImage}
+                onClick={() => currentImage && toggleFavorite(currentImage)}
+                title={currentImage && isImageFavorited(currentImage) ? "取消收藏" : "收藏图片"}
+                type="button"
+              >
+                <Heart aria-hidden="true" />
+              </button>
               <button
                 className="icon-button"
                 disabled={!currentImage}
@@ -1867,6 +1984,59 @@ function App() {
                 写入主 Prompt
               </button>
             </div>
+          </section>
+
+          {notice ? <div className={`notice settings-notice ${notice.type}`}>{notice.message}</div> : null}
+        </section>
+      ) : activePanel === "favorites" ? (
+        <section className="favorites-page" aria-label="Favorite gallery">
+          <header className="settings-header">
+            <div>
+              <p className="eyebrow">Gallery</p>
+              <h2>收藏画廊</h2>
+              <span>保存你想长期保留的生成结果，点击图片可回到生图工作台。</span>
+            </div>
+          </header>
+
+          <section className="settings-panel favorites-panel">
+            <div className="section-head">
+              <Heart aria-hidden="true" />
+              <h2>已收藏</h2>
+              <span className="section-meta">{favorites.length}</span>
+            </div>
+
+            {favorites.length === 0 ? (
+              <div className="mini-empty favorites-empty">
+                <Heart aria-hidden="true" />
+                <strong>暂无收藏</strong>
+                <span>在预览图下方点击心形按钮收藏图片。</span>
+              </div>
+            ) : (
+              <div className="favorites-grid">
+                {favorites.map((item) => (
+                  <article className="favorite-card" key={item.id}>
+                    <button className="favorite-image" onClick={() => openFavorite(item)} type="button">
+                      <img src={`data:${item.image.mimeType};base64,${item.image.base64}`} alt="" />
+                    </button>
+                    <div className="favorite-info">
+                      <strong>{item.request.prompt || "未命名提示词"}</strong>
+                      <span>{new Date(item.createdAt).toLocaleString()} · {formatBytes(item.image.byteLen)}</span>
+                    </div>
+                    <div className="favorite-actions">
+                      <button className="icon-button" onClick={() => copyImage(item.image)} title="复制图片" type="button">
+                        <Copy aria-hidden="true" />
+                      </button>
+                      <button className="icon-button" onClick={() => saveImage(item.image)} title="保存图片" type="button">
+                        <Download aria-hidden="true" />
+                      </button>
+                      <button className="icon-button" onClick={() => removeFavorite(item.id)} title="移除收藏" type="button">
+                        <Eraser aria-hidden="true" />
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
           </section>
 
           {notice ? <div className={`notice settings-notice ${notice.type}`}>{notice.message}</div> : null}
@@ -3146,6 +3316,46 @@ async function savePromptLibraryCache(record: PromptLibraryCacheRecord) {
   }
 }
 
+async function loadFavoritesFromIndexedDb(): Promise<FavoriteItem[]> {
+  if (!("indexedDB" in window)) {
+    return [];
+  }
+
+  const db = await openHistoryDatabase();
+  try {
+    const tx = db.transaction(FAVORITES_STORE_NAME, "readonly");
+    const store = tx.objectStore(FAVORITES_STORE_NAME);
+    const items = (await requestToPromise<FavoriteItem[]>(store.getAll())) ?? [];
+    return items
+      .map((item) => ({
+        ...item,
+        request: normalizeImageRequest(item.request),
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  } finally {
+    db.close();
+  }
+}
+
+async function saveFavoritesToIndexedDb(favorites: FavoriteItem[]) {
+  if (!("indexedDB" in window)) {
+    return;
+  }
+
+  const db = await openHistoryDatabase();
+  try {
+    const tx = db.transaction(FAVORITES_STORE_NAME, "readwrite");
+    const store = tx.objectStore(FAVORITES_STORE_NAME);
+    await requestToPromise(store.clear());
+    for (const item of favorites) {
+      await requestToPromise(store.put(item));
+    }
+    await transactionDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
 async function saveHistoryToIndexedDb(history: HistoryItem[]) {
   if (!("indexedDB" in window)) {
     return;
@@ -3195,6 +3405,9 @@ function openHistoryDatabase() {
       if (!db.objectStoreNames.contains(PROMPT_LIBRARY_STORE_NAME)) {
         db.createObjectStore(PROMPT_LIBRARY_STORE_NAME, { keyPath: "type" });
       }
+      if (!db.objectStoreNames.contains(FAVORITES_STORE_NAME)) {
+        db.createObjectStore(FAVORITES_STORE_NAME, { keyPath: "id" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("Failed to open IndexedDB"));
@@ -3220,8 +3433,11 @@ function sortHistory(history: HistoryItem[]) {
   return [...history].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-function parseNovelAiPngMetadata(buffer: ArrayBuffer): ImportedImageMetadata {
-  const chunks = readPngTextChunks(buffer);
+async function parseNovelAiPngMetadata(buffer: ArrayBuffer): Promise<ImportedImageMetadata> {
+  const chunks = [
+    ...readPngTextChunks(buffer),
+    ...(await readStealthPngTextChunks(buffer)),
+  ];
   const texts = new Map<string, string>();
 
   for (const chunk of chunks) {
@@ -3274,7 +3490,7 @@ function parseNovelAiPngMetadata(buffer: ArrayBuffer): ImportedImageMetadata {
   const seed = findNumberInSources(parsedObjects, ["seed"]);
   const sampler = findStringInSources(parsedObjects, ["sampler"]);
   const noiseSchedule = findStringInSources(parsedObjects, ["noise_schedule", "noiseschedule"]);
-  const model = findStringInSources(parsedObjects, ["model"]);
+  const model = findStringInSources(parsedObjects, ["model"]) ?? parseNovelAiModelFromSource(texts.get("source"));
   const nSamples = findNumberInSources(parsedObjects, ["n_samples", "nsamples"]);
 
   return {
@@ -3450,6 +3666,67 @@ function parseNegativePromptFromMetadataStrings(values: string[]) {
   return undefined;
 }
 
+function parseNovelAiModelFromSource(source?: string) {
+  if (!source) {
+    return undefined;
+  }
+
+  const normalized = source.toLowerCase();
+  if (normalized.includes("v4.5")) {
+    return "nai-diffusion-4-5-full";
+  }
+  if (normalized.includes("v4")) {
+    return "nai-diffusion-4-full";
+  }
+  if (normalized.includes("v3")) {
+    return "nai-diffusion-3";
+  }
+  if (normalized.includes("v2")) {
+    return "nai-diffusion-2";
+  }
+  return undefined;
+}
+
+function findPngFileFromClipboard(data: DataTransfer | null) {
+  if (!data) {
+    return null;
+  }
+
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== "file") {
+      continue;
+    }
+
+    const file = item.getAsFile();
+    if (file && isPngFile(file)) {
+      return ensureNamedClipboardFile(file);
+    }
+  }
+
+  for (const file of Array.from(data.files)) {
+    if (isPngFile(file)) {
+      return ensureNamedClipboardFile(file);
+    }
+  }
+
+  return null;
+}
+
+function isPngFile(file: File) {
+  return file.type === "image/png" || file.name.toLowerCase().endsWith(".png");
+}
+
+function ensureNamedClipboardFile(file: File) {
+  if (file.name) {
+    return file;
+  }
+
+  return new File([file], "clipboard.png", {
+    type: file.type || "image/png",
+    lastModified: file.lastModified || Date.now(),
+  });
+}
+
 function extractFieldFromText(text: string, labels: string[]) {
   const normalized = text.replace(/\r\n/g, "\n");
   for (const label of labels) {
@@ -3529,6 +3806,294 @@ function readPngTextChunks(buffer: ArrayBuffer): PngTextChunk[] {
   }
 
   return chunks;
+}
+
+async function readStealthPngTextChunks(buffer: ArrayBuffer): Promise<PngTextChunk[]> {
+  const image = readPngRasterInfo(buffer);
+  if (!image || image.bitDepth !== 8 || (image.colorType !== 2 && image.colorType !== 6)) {
+    return [];
+  }
+
+  const bytesPerPixel = image.colorType === 6 ? 4 : 3;
+  const inflated = await decompressBytes(concatBytes(image.idatChunks), "deflate");
+  if (!inflated) {
+    return [];
+  }
+
+  const pixels = unfilterPngPixels(inflated, image.width, image.height, bytesPerPixel);
+  if (!pixels) {
+    return [];
+  }
+
+  const attempts = image.colorType === 6
+    ? [
+        { channels: [3], columnFirst: true },
+        { channels: [0, 1, 2], columnFirst: true },
+        { channels: [3], columnFirst: false },
+        { channels: [0, 1, 2], columnFirst: false },
+      ]
+    : [
+        { channels: [0, 1, 2], columnFirst: true },
+        { channels: [0, 1, 2], columnFirst: false },
+      ];
+
+  for (const attempt of attempts) {
+    const stealth = await extractStealthPngPayload(
+      pixels,
+      image.width,
+      image.height,
+      bytesPerPixel,
+      attempt.channels,
+      attempt.columnFirst,
+    );
+    if (stealth.length > 0) {
+      return stealth;
+    }
+  }
+
+  return [];
+}
+
+function readPngRasterInfo(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (signature.some((value, index) => bytes[index] !== value)) {
+    return null;
+  }
+
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  const idatChunks: Uint8Array[] = [];
+  let offset = 8;
+
+  while (offset + 12 <= bytes.length) {
+    const length = readUint32(bytes, offset);
+    const type = readAscii(bytes, offset + 4, 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > bytes.length) {
+      break;
+    }
+
+    if (type === "IHDR") {
+      width = readUint32(bytes, dataStart);
+      height = readUint32(bytes, dataStart + 4);
+      bitDepth = bytes[dataStart + 8];
+      colorType = bytes[dataStart + 9];
+    } else if (type === "IDAT") {
+      idatChunks.push(readBytes(bytes, dataStart, length));
+    } else if (type === "IEND") {
+      break;
+    }
+
+    offset = dataEnd + 4;
+  }
+
+  if (!width || !height || idatChunks.length === 0) {
+    return null;
+  }
+
+  return { width, height, bitDepth, colorType, idatChunks };
+}
+
+async function extractStealthPngPayload(
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  bytesPerPixel: number,
+  channels: number[],
+  columnFirst: boolean,
+): Promise<PngTextChunk[]> {
+  const signatures = ["stealth_pnginfo", "stealth_pngcomp"];
+  const headerLength = Math.max(...signatures.map((signature) => signature.length)) + 4;
+  const header = readStealthBytes(pixels, width, height, bytesPerPixel, channels, columnFirst, headerLength);
+  const headerText = decodeLatin1(header);
+  const signature = signatures.find((value) => headerText.startsWith(value));
+  if (!signature) {
+    return [];
+  }
+
+  const bitLength = readBigEndianUint32(header, signature.length);
+  const availableBits = width * height * channels.length - (signature.length + 4) * 8;
+  if (bitLength <= 0 || bitLength > availableBits) {
+    return [];
+  }
+
+  const payloadByteLength = Math.ceil(bitLength / 8);
+  const allBytes = readStealthBytes(
+    pixels,
+    width,
+    height,
+    bytesPerPixel,
+    channels,
+    columnFirst,
+    signature.length + 4 + payloadByteLength,
+  );
+  const payload = allBytes.slice(signature.length + 4, signature.length + 4 + payloadByteLength);
+  const text = signature === "stealth_pngcomp"
+    ? await decompressBytes(payload, "gzip").then((value) => value ? decodeText(value) : "")
+    : decodeText(payload);
+
+  return parseStealthMetadataText(text);
+}
+
+function readStealthBytes(
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  bytesPerPixel: number,
+  channels: number[],
+  columnFirst: boolean,
+  byteCount: number,
+) {
+  const output = new Uint8Array(byteCount);
+  let bitIndex = 0;
+  const targetBits = byteCount * 8;
+  const pushPixel = (x: number, y: number) => {
+    const offset = (y * width + x) * bytesPerPixel;
+    for (const channel of channels) {
+      if (bitIndex >= targetBits) {
+        return;
+      }
+      const bit = pixels[offset + channel] & 1;
+      output[Math.floor(bitIndex / 8)] |= bit << (7 - (bitIndex % 8));
+      bitIndex += 1;
+    }
+  };
+
+  if (columnFirst) {
+    for (let x = 0; x < width && bitIndex < targetBits; x += 1) {
+      for (let y = 0; y < height && bitIndex < targetBits; y += 1) {
+        pushPixel(x, y);
+      }
+    }
+  } else {
+    for (let y = 0; y < height && bitIndex < targetBits; y += 1) {
+      for (let x = 0; x < width && bitIndex < targetBits; x += 1) {
+        pushPixel(x, y);
+      }
+    }
+  }
+
+  return output;
+}
+
+function parseStealthMetadataText(text: string): PngTextChunk[] {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.entries(parsed as Record<string, unknown>)
+        .filter(([, value]) => typeof value === "string")
+        .map(([keyword, value]) => ({ keyword, text: value as string }));
+    }
+  } catch {
+    // Fall back to treating the payload as a raw metadata string.
+  }
+
+  return [{ keyword: "parameters", text: trimmed }];
+}
+
+function unfilterPngPixels(inflated: Uint8Array, width: number, height: number, bytesPerPixel: number) {
+  const stride = width * bytesPerPixel;
+  const expectedLength = height * (stride + 1);
+  if (inflated.length < expectedLength) {
+    return null;
+  }
+
+  const pixels = new Uint8Array(height * stride);
+  let inputOffset = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    const filter = inflated[inputOffset];
+    inputOffset += 1;
+    const rowStart = y * stride;
+    const previousRowStart = rowStart - stride;
+
+    for (let x = 0; x < stride; x += 1) {
+      const raw = inflated[inputOffset + x];
+      const left = x >= bytesPerPixel ? pixels[rowStart + x - bytesPerPixel] : 0;
+      const up = y > 0 ? pixels[previousRowStart + x] : 0;
+      const upLeft = y > 0 && x >= bytesPerPixel ? pixels[previousRowStart + x - bytesPerPixel] : 0;
+      let value = raw;
+
+      if (filter === 1) {
+        value = raw + left;
+      } else if (filter === 2) {
+        value = raw + up;
+      } else if (filter === 3) {
+        value = raw + Math.floor((left + up) / 2);
+      } else if (filter === 4) {
+        value = raw + paethPredictor(left, up, upLeft);
+      } else if (filter !== 0) {
+        return null;
+      }
+
+      pixels[rowStart + x] = value & 255;
+    }
+
+    inputOffset += stride;
+  }
+
+  return pixels;
+}
+
+function paethPredictor(left: number, up: number, upLeft: number) {
+  const predictor = left + up - upLeft;
+  const leftDistance = Math.abs(predictor - left);
+  const upDistance = Math.abs(predictor - up);
+  const upLeftDistance = Math.abs(predictor - upLeft);
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) {
+    return left;
+  }
+  return upDistance <= upLeftDistance ? up : upLeft;
+}
+
+async function decompressBytes(bytes: Uint8Array, format: "deflate" | "gzip") {
+  const ctor = (globalThis as typeof globalThis & {
+    DecompressionStream?: new(format: "deflate" | "gzip") => TransformStream<Uint8Array, Uint8Array>;
+  }).DecompressionStream;
+  if (!ctor) {
+    return null;
+  }
+
+  try {
+    const payload = new Uint8Array(bytes);
+    const stream = new Blob([payload.buffer as ArrayBuffer]).stream().pipeThrough(new ctor(format));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+function concatBytes(chunks: Uint8Array[]) {
+  const length = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return output;
+}
+
+function readBigEndianUint32(bytes: Uint8Array, offset: number) {
+  return (
+    (bytes[offset] << 24) |
+    (bytes[offset + 1] << 16) |
+    (bytes[offset + 2] << 8) |
+    bytes[offset + 3]
+  ) >>> 0;
+}
+
+function decodeLatin1(bytes: Uint8Array) {
+  return String.fromCharCode(...bytes);
 }
 
 function decodeItxtChunk(data: Uint8Array): PngTextChunk | null {
