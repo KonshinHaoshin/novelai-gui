@@ -69,8 +69,9 @@ h2 {
   display: grid;
   grid-template-columns: 64px 300px minmax(560px, 1fr) 330px;
   gap: 14px;
-  min-height: 100vh;
+  height: 100vh;
   padding: 14px;
+  overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0)),
     var(--bg);
@@ -172,12 +173,16 @@ h2 {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: calc(100vh - 28px);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+.prompt-rail {
+  padding-right: 2px;
 }
 
 .parameter-rail {
-  overflow-y: auto;
   padding-right: 2px;
 }
 
@@ -455,8 +460,14 @@ h2 {
 .character-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
 }
 
 .character-head strong {
@@ -468,6 +479,16 @@ h2 {
 .character-head .icon-button {
   width: 30px;
   height: 30px;
+  flex-shrink: 0;
+}
+
+.character-prompt-preview {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
 }
 
 .character-item textarea {
@@ -541,7 +562,8 @@ select:focus {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 12px;
-  min-height: calc(100vh - 28px);
+  overflow: hidden;
+  min-height: 0;
 }
 
 .stage-card {

@@ -333,6 +333,9 @@ function App() {
   const [advancedOpen, setAdvancedOpen] = useState(true);
   const [apiToolsOpen, setApiToolsOpen] = useState(true);
   const [characterOpen, setCharacterOpen] = useState(false);
+  const [expandedCharacterId, setExpandedCharacterId] = useState<string | null>(null);
+  const [stylePromptOpen, setStylePromptOpen] = useState(true);
+  const [sizePresetOpen, setSizePresetOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [activePanel, setActivePanel] = useState<"generate" | "promptLibrary" | "settings" | "favorites">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
@@ -803,7 +806,6 @@ function App() {
     setRequest(normalizeImageRequest(item.request));
     setActiveImages(item.images);
     setSelectedImage(Math.min(Math.max(imageIndex, 0), Math.max(item.images.length - 1, 0)));
-    showNotice("info", "已恢复历史参数。");
   }
 
   function update<K extends keyof ImageRequest>(key: K, value: ImageRequest[K]) {
@@ -1272,12 +1274,16 @@ function App() {
           </div>
         </section>
 
-        <section className="prompt-card compact">
-          <div className="card-head">
-            <div>
-              <h2>画风提示词</h2>
-            </div>
-            <div className="prompt-actions">
+        {stylePromptOpen ? (
+          <section className="prompt-card compact">
+            <button className="section-toggle" onClick={() => setStylePromptOpen(false)} type="button">
+              <span>
+                <WandSparkles aria-hidden="true" />
+                画风提示词
+              </span>
+              <ChevronDown className="open" aria-hidden="true" />
+            </button>
+            <div className="prompt-actions" style={{ padding: "0 0 8px 0" }}>
               <TranslateButtons
                 disabled={translatingField !== null || !request.stylePrompt.trim()}
                 enActive={translatingField === "stylePrompt:zh-to-en-tags"}
@@ -1287,15 +1293,23 @@ function App() {
               />
               <span>{request.stylePrompt.length}</span>
             </div>
-          </div>
-          <textarea
-            className="prompt-textarea"
-            value={request.stylePrompt}
-            onChange={(event) => update("stylePrompt", event.target.value)}
-            placeholder="year 2023, official art, anime style..."
-            rows={3}
-          />
-        </section>
+            <textarea
+              className="prompt-textarea"
+              value={request.stylePrompt}
+              onChange={(event) => update("stylePrompt", event.target.value)}
+              placeholder="year 2023, official art, anime style..."
+              rows={3}
+            />
+          </section>
+        ) : (
+          <button className="section-toggle" onClick={() => setStylePromptOpen(true)} type="button" style={{ padding: "8px 14px" }}>
+            <span>
+              <WandSparkles aria-hidden="true" />
+              画风提示词
+            </span>
+            <ChevronDown aria-hidden="true" />
+          </button>
+        )}
 
         <section className="prompt-card primary">
           <div className="card-head">
@@ -1486,13 +1500,6 @@ function App() {
           ) : null}
         </section>
 
-        <div className="status-bar">
-          <span className={isGenerating ? "status-pill busy" : "status-pill ok"}>{isGenerating ? "生成中" : "就绪"}</span>
-          <span>API 状态：{hasToken ? "已配置" : "未配置 Token"}</span>
-          <span>账号点数：{formatOptionalPoints(account?.points)}</span>
-          <span>Tier：{account?.tier ?? "未知"}</span>
-          {notice ? <strong className={`status-message ${notice.type}`}>{notice.message}</strong> : null}
-        </div>
       </section>
 
       <aside className="parameter-rail" aria-label="Generation parameters">
@@ -1524,10 +1531,10 @@ function App() {
               ))}
             </select>
           </label>
-          <div className="model-note">
+          {/* <div className="model-note">
             <ShieldCheck aria-hidden="true" />
             默认使用 NAI 4.5 full；局部重绘会自动切到对应 inpainting 模型。
-          </div>
+          </div> */}
         </section>
 
         <section className="parameter-card">
@@ -1735,72 +1742,95 @@ function App() {
                   <div className="character-empty">添加角色后，会写入 V4 char_captions。</div>
                 ) : (
                   <div className="character-list">
-                    {(request.characters ?? []).map((character, index) => (
-                      <div className="character-item" key={character.id}>
-                        <div className="character-head">
-                          <strong>角色 {index + 1}</strong>
-                          <button className="icon-button" onClick={() => removeCharacter(character.id)} title="删除角色" type="button">
-                            <Eraser aria-hidden="true" />
+                    {(request.characters ?? []).map((character, index) => {
+                      const isExpanded = expandedCharacterId === character.id;
+                      return (
+                        <div className="character-item" key={character.id}>
+                          <button
+                            className="character-head"
+                            onClick={() => setExpandedCharacterId(isExpanded ? null : character.id)}
+                            type="button"
+                          >
+                            <strong>角色 {index + 1}</strong>
+                            <span className="character-prompt-preview">
+                              {character.prompt.trim() ? character.prompt.trim().split(",")[0].slice(0, 24) : "空"}
+                            </span>
+                            <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+                              <ChevronDown className={isExpanded ? "open" : ""} aria-hidden="true" style={{ width: 14, height: 14 }} />
+                              <button
+                                className="icon-button"
+                                onClick={(event) => { event.stopPropagation(); removeCharacter(character.id); }}
+                                title="删除角色"
+                                type="button"
+                                style={{ width: 24, height: 24 }}
+                              >
+                                <Eraser aria-hidden="true" />
+                              </button>
+                            </div>
                           </button>
+                          {isExpanded ? (
+                            <>
+                              <label className="field">
+                                <span className="field-label-row">
+                                  角色提示词
+                                  <TranslateButtons
+                                    compact
+                                    disabled={translatingField !== null || !character.prompt.trim()}
+                                    enActive={translatingField === `character:${character.id}:prompt:zh-to-en-tags`}
+                                    zhActive={translatingField === `character:${character.id}:prompt:en-to-zh`}
+                                    onEnglish={() => void translateCharacterPrompt(character.id, "prompt", "zh-to-en-tags")}
+                                    onChinese={() => void translateCharacterPrompt(character.id, "prompt", "en-to-zh")}
+                                  />
+                                </span>
+                                <textarea
+                                  value={character.prompt}
+                                  onChange={(event) => updateCharacter(character.id, "prompt", event.target.value)}
+                                  placeholder="1girl, pink hair, school uniform"
+                                  rows={3}
+                                />
+                              </label>
+                              <label className="field">
+                                <span className="field-label-row">
+                                  角色负向提示词
+                                  <TranslateButtons
+                                    compact
+                                    disabled={translatingField !== null || !character.negativePrompt.trim()}
+                                    enActive={translatingField === `character:${character.id}:negativePrompt:zh-to-en-tags`}
+                                    zhActive={translatingField === `character:${character.id}:negativePrompt:en-to-zh`}
+                                    onEnglish={() => void translateCharacterPrompt(character.id, "negativePrompt", "zh-to-en-tags")}
+                                    onChinese={() => void translateCharacterPrompt(character.id, "negativePrompt", "en-to-zh")}
+                                  />
+                                </span>
+                                <textarea
+                                  value={character.negativePrompt}
+                                  onChange={(event) => updateCharacter(character.id, "negativePrompt", event.target.value)}
+                                  placeholder="bad hands, blurry"
+                                  rows={2}
+                                />
+                              </label>
+                              <div className="field-grid">
+                                <NumberField
+                                  label="X"
+                                  value={character.x}
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  onChange={(value) => updateCharacter(character.id, "x", clampCoordinate(value))}
+                                />
+                                <NumberField
+                                  label="Y"
+                                  value={character.y}
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  onChange={(value) => updateCharacter(character.id, "y", clampCoordinate(value))}
+                                />
+                              </div>
+                            </>
+                          ) : null}
                         </div>
-                        <label className="field">
-                          <span className="field-label-row">
-                            角色提示词
-                            <TranslateButtons
-                              compact
-                              disabled={translatingField !== null || !character.prompt.trim()}
-                              enActive={translatingField === `character:${character.id}:prompt:zh-to-en-tags`}
-                              zhActive={translatingField === `character:${character.id}:prompt:en-to-zh`}
-                              onEnglish={() => void translateCharacterPrompt(character.id, "prompt", "zh-to-en-tags")}
-                              onChinese={() => void translateCharacterPrompt(character.id, "prompt", "en-to-zh")}
-                            />
-                          </span>
-                          <textarea
-                            value={character.prompt}
-                            onChange={(event) => updateCharacter(character.id, "prompt", event.target.value)}
-                            placeholder="1girl, pink hair, school uniform"
-                            rows={3}
-                          />
-                        </label>
-                        <label className="field">
-                          <span className="field-label-row">
-                            角色负向提示词
-                            <TranslateButtons
-                              compact
-                              disabled={translatingField !== null || !character.negativePrompt.trim()}
-                              enActive={translatingField === `character:${character.id}:negativePrompt:zh-to-en-tags`}
-                              zhActive={translatingField === `character:${character.id}:negativePrompt:en-to-zh`}
-                              onEnglish={() => void translateCharacterPrompt(character.id, "negativePrompt", "zh-to-en-tags")}
-                              onChinese={() => void translateCharacterPrompt(character.id, "negativePrompt", "en-to-zh")}
-                            />
-                          </span>
-                          <textarea
-                            value={character.negativePrompt}
-                            onChange={(event) => updateCharacter(character.id, "negativePrompt", event.target.value)}
-                            placeholder="bad hands, blurry"
-                            rows={2}
-                          />
-                        </label>
-                        <div className="field-grid">
-                          <NumberField
-                            label="X"
-                            value={character.x}
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            onChange={(value) => updateCharacter(character.id, "x", clampCoordinate(value))}
-                          />
-                          <NumberField
-                            label="Y"
-                            value={character.y}
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            onChange={(value) => updateCharacter(character.id, "y", clampCoordinate(value))}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </>
@@ -1809,33 +1839,43 @@ function App() {
         </section>
 
         <section className="parameter-card">
-          <div className="section-head">
-            <SlidersHorizontal aria-hidden="true" />
-            <h2>图像尺寸</h2>
-          </div>
+          <button className="section-toggle" onClick={() => setSizePresetOpen((open) => !open)} type="button">
+            <span>
+              <SlidersHorizontal aria-hidden="true" />
+              图像尺寸
+            </span>
+            <span className="section-meta">{request.width}×{request.height}</span>
+            <ChevronDown className={sizePresetOpen ? "open" : ""} aria-hidden="true" />
+          </button>
 
-          <div className="preset-row">
-            {SIZE_PRESETS.map((preset) => (
-              <button
-                className={request.width === preset.width && request.height === preset.height ? "chip active" : "chip"}
-                key={preset.label}
-                onClick={() => {
-                  update("width", preset.width);
-                  update("height", preset.height);
-                }}
-                type="button"
-              >
-                {preset.label}
-              </button>
-            ))}
-          </div>
+          {sizePresetOpen ? (
+            <>
+              <div className="preset-row">
+                {SIZE_PRESETS.map((preset) => (
+                  <button
+                    className={request.width === preset.width && request.height === preset.height ? "chip active" : "chip"}
+                    key={preset.label}
+                    onClick={() => {
+                      update("width", preset.width);
+                      update("height", preset.height);
+                    }}
+                    type="button"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
 
-          <div className="field-grid four">
-            <NumberField label="宽度" value={request.width} min={64} max={2048} onChange={(value) => update("width", value)} />
-            <NumberField label="高度" value={request.height} min={64} max={2048} onChange={(value) => update("height", value)} />
-            <NumberField label="采样数" value={request.nSamples} min={1} max={8} onChange={(value) => update("nSamples", value)} />
-            <OptionalNumberField label="种子" value={request.seed} min={0} max={4294967295} onChange={(value) => update("seed", value)} />
-          </div>
+              <div className="field-grid four">
+                <NumberField label="宽度" value={request.width} min={64} max={2048} onChange={(value) => update("width", value)} />
+                <NumberField label="高度" value={request.height} min={64} max={2048} onChange={(value) => update("height", value)} />
+                <NumberField label="采样数" value={request.nSamples} min={1} max={8} onChange={(value) => update("nSamples", value)} />
+              </div>
+              <div className="field-grid">
+                <OptionalNumberField label="种子" value={request.seed} min={0} max={4294967295} onChange={(value) => update("seed", value)} />
+              </div>
+            </>
+          ) : null}
         </section>
 
         <section className="parameter-card">
