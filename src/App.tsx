@@ -1072,7 +1072,11 @@ function App() {
     if (!translated) {
       throw new Error("翻译模型没有返回有效文本。");
     }
-    return translated.replace(/^["'`]+|["'`]+$/g, "").trim();
+    return translated
+      .replace(/[，、；]/g, ", ")
+      .replace(/\s*,\s*/g, ", ")
+      .replace(/^["'`]+|["'`]+$/g, "")
+      .trim();
   }
 
   function clearHistory() {
@@ -2964,6 +2968,8 @@ function buildTranslationSystemPrompt(direction: TranslationDirection, kind: "po
     "Convert sentence-like Chinese into AI-friendly comma-separated tags.",
     "Prefer concrete visual tags: subject, clothing, pose, scene, lighting, camera, style, quality.",
     "Keep existing English tags and artist names as-is.",
+    "IMPORTANT: Use spaces between words in each tag. Do NOT merge words together like 'playtheguitar'.",
+    "IMPORTANT: Always use English commas (,) followed by a space. Never output Chinese commas.",
     "Do not output Chinese. Do not explain. Do not wrap the result in quotes or markdown.",
     kind === "negative"
       ? "This is a negative prompt: use exclusion tags for unwanted artifacts, anatomy issues, quality problems, text, watermarks, and blur."
