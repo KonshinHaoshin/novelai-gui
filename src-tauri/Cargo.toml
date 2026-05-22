@@ -1,6 +1,6 @@
 [package]
 name = "novelai-gui"
-version = "0.1.0"
+version = "0.1.1"
 description = "A desktop GUI for NovelAI image generation"
 authors = ["Dongshan Randeng"]
 edition = "2021"

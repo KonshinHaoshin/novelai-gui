@@ -34,6 +34,7 @@ type ImageAction = "generate" | "img2img" | "infill";
 type ImageFormat = "png" | "webp";
 
 type ImageRequest = {
+  stylePrompt: string;
   prompt: string;
   negativePrompt: string;
   characters: CharacterPrompt[];
@@ -247,6 +248,7 @@ const PROMPT_LIBRARY_MAX_RESULTS = 5000;
 const PROMPT_LIBRARY_PAGE_SIZE = 80;
 
 const DEFAULT_REQUEST: ImageRequest = {
+  stylePrompt: "",
   prompt: "",
   negativePrompt: "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, @_@, mismatched pupils, glowing eyes, bad anatomy, multiple views, building, city, blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, bad quality, very displeasing, chromatic aberration, logo, dated, signature, multiple views, gigantic breasts, nun, pov, pubic hair, wolf, animal, chibi, doll, milk, lowres, bad, error, fewer, extra, missing, worst quality, jpeg artifacts, bad quality, watermark, unfinished, displeasing, chromatic aberration, signature, extra digits, artistic error, username, scan, abstract, very displeasing, displeasing, lowres, lowres, bad, text, error, missing, extra, fewer, cropped, jpeg artifacts, worst quality, bad quality, watermark, displeasing, unfinished, chromatic aberration, scan, scan artifacts, photo, deformed, realism, disfigured, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, nsfw, :(mutated hands and fingers, one hand with more than 5 fingers, one hand with less than 5 fingers):0.8, text,",
   characters: [],
@@ -459,9 +461,9 @@ function App() {
         request.action === "generate" ||
         (request.action === "img2img" && Boolean(request.sourceImage)) ||
         (request.action === "infill" && Boolean(request.sourceImage && request.maskImage));
-      return request.prompt.trim().length > 0 && hasToken && !isGenerating && hasRequiredImage;
+      return effectivePrompt(request).length > 0 && hasToken && !isGenerating && hasRequiredImage;
     },
-    [hasToken, isGenerating, request.action, request.maskImage, request.prompt, request.sourceImage],
+    [hasToken, isGenerating, request.action, request.maskImage, request.prompt, request.stylePrompt, request.sourceImage],
   );
 
   async function saveToken() {
@@ -778,7 +780,7 @@ function App() {
       const response = await invoke<GenerateImageResponse>("augment_image", {
         request: {
           image: image.base64,
-          prompt: request.directorReferencePrompt || request.prompt,
+          prompt: request.directorReferencePrompt || effectivePrompt(request),
           width: request.width,
           height: request.height,
           reqType: directorToolType,
@@ -895,19 +897,10 @@ function App() {
         return next;
       });
 
-      setRequest((current) => {
-        let nextPrompt = current.prompt;
-        if (currentSelection?.prompt) {
-          nextPrompt = removePromptText(nextPrompt, currentSelection.prompt);
-        }
-        if (!isSameSelection) {
-          nextPrompt = appendPromptText(nextPrompt, prompt);
-        }
-        return {
-          ...current,
-          prompt: nextPrompt,
-        };
-      });
+      setRequest((current) => ({
+        ...current,
+        stylePrompt: isSameSelection ? "" : prompt,
+      }));
 
       setPromptLibraryStatus(isSameSelection ? `已取消画风：${entry.title}` : `已应用画风：${entry.title}`);
       return;
@@ -927,11 +920,13 @@ function App() {
   }
 
   function updateMainPromptFromSelection() {
+    const styleEntry = selectedPromptEntries.style;
     setRequest((current) => ({
       ...current,
-      prompt: buildPromptSelectionText(selectedPromptEntries.style, selectedPromptBoxes),
+      stylePrompt: styleEntry?.prompt?.trim() ?? "",
+      prompt: buildPromptSelectionText(undefined, selectedPromptBoxes),
     }));
-    setPromptLibraryStatus("已写入主 Prompt。");
+    setPromptLibraryStatus("已写入画风和主提示词。");
   }
 
   function addCharacter() {
@@ -970,7 +965,7 @@ function App() {
     );
   }
 
-  async function translatePromptField(field: "prompt" | "negativePrompt", direction: TranslationDirection) {
+  async function translatePromptField(field: "prompt" | "negativePrompt" | "stylePrompt", direction: TranslationDirection) {
     const text = request[field].trim();
     if (!text) {
       showNotice("info", "没有可翻译的提示词。");
@@ -1275,6 +1270,31 @@ function App() {
             <h1>NovelAI GUI</h1>
             <p>AI Image Generation</p>
           </div>
+        </section>
+
+        <section className="prompt-card compact">
+          <div className="card-head">
+            <div>
+              <h2>画风提示词</h2>
+            </div>
+            <div className="prompt-actions">
+              <TranslateButtons
+                disabled={translatingField !== null || !request.stylePrompt.trim()}
+                enActive={translatingField === "stylePrompt:zh-to-en-tags"}
+                zhActive={translatingField === "stylePrompt:en-to-zh"}
+                onEnglish={() => void translatePromptField("stylePrompt", "zh-to-en-tags")}
+                onChinese={() => void translatePromptField("stylePrompt", "en-to-zh")}
+              />
+              <span>{request.stylePrompt.length}</span>
+            </div>
+          </div>
+          <textarea
+            className="prompt-textarea"
+            value={request.stylePrompt}
+            onChange={(event) => update("stylePrompt", event.target.value)}
+            placeholder="year 2023, official art, anime style..."
+            rows={3}
+          />
         </section>
 
         <section className="prompt-card primary">
@@ -1977,11 +1997,15 @@ function App() {
 
             <div className="prompt-library-output">
               <label className="field">
-                <span>已选素材</span>
-                <textarea readOnly rows={6} value={buildPromptSelectionText(selectedPromptEntries.style, selectedPromptBoxes)} />
+                <span>已选画风</span>
+                <textarea readOnly rows={2} value={selectedPromptEntries.style?.prompt?.trim() ?? ""} placeholder="未选择画风" />
+              </label>
+              <label className="field">
+                <span>已选场景/服装</span>
+                <textarea readOnly rows={4} value={buildPromptSelectionText(undefined, selectedPromptBoxes)} placeholder="未选择场景或服装" />
               </label>
               <button className="ghost-button wide-button" onClick={() => updateMainPromptFromSelection()} type="button">
-                写入主 Prompt
+                写入提示词
               </button>
             </div>
           </section>
@@ -2885,6 +2909,15 @@ function buildPromptSelectionText(
   return parts.join(", ");
 }
 
+function effectivePrompt(request: ImageRequest) {
+  const style = request.stylePrompt.trim();
+  const main = request.prompt.trim();
+  if (style && main) {
+    return `${style}, ${main}`;
+  }
+  return style || main;
+}
+
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
@@ -2943,7 +2976,7 @@ function buildPayloadPreview(request: ImageRequest) {
   const parameters: Record<string, unknown> = {
     width: request.width,
     height: request.height,
-    prompt: request.prompt,
+    prompt: effectivePrompt(request),
     negative_prompt: request.negativePrompt,
     n_samples: request.nSamples,
     steps: request.steps,
@@ -2981,7 +3014,7 @@ function buildPayloadPreview(request: ImageRequest) {
   }
   if (request.directorReferenceImage) {
     parameters.director_reference_images = [`[${request.directorReferenceImage.name}]`];
-    parameters.director_reference_descriptions = [request.directorReferencePrompt || request.prompt];
+    parameters.director_reference_descriptions = [request.directorReferencePrompt || effectivePrompt(request)];
     parameters.director_reference_strength_values = [request.directorReferenceStrength];
     parameters.director_reference_secondary_strength_values = [request.directorReferenceSecondaryStrength];
     parameters.director_reference_information_extracted = [request.directorReferenceInformationExtracted];
@@ -2997,7 +3030,7 @@ function buildPayloadPreview(request: ImageRequest) {
     parameters.use_coords = useCoords;
     parameters.v4_prompt = {
       caption: {
-        base_caption: request.prompt,
+        base_caption: effectivePrompt(request),
         char_captions: characterCaptions.map((character) => ({
           char_caption: character.prompt,
           centers: character.centers,
@@ -3019,7 +3052,7 @@ function buildPayloadPreview(request: ImageRequest) {
   }
 
   return {
-    input: request.prompt,
+    input: effectivePrompt(request),
     model: effectiveImageModel(request),
     action: request.action,
     parameters,
@@ -3029,6 +3062,7 @@ function buildPayloadPreview(request: ImageRequest) {
 function buildBackendImageRequest(request: ImageRequest, settings: AppSettings) {
   return {
     ...request,
+    prompt: effectivePrompt(request),
     allowInvalidTls: settings.allowInvalidTls,
     proxyUrl: settings.novelAiProxyUrl,
     model: effectiveImageModel(request),
