@@ -220,7 +220,7 @@ type PromptLibraryCacheRecord = {
 const HISTORY_KEY = "novelai-gui-history";
 const SETTINGS_KEY = "novelai-gui-settings";
 const HISTORY_DB_NAME = "novelai-gui";
-const HISTORY_DB_VERSION = 3;
+const HISTORY_DB_VERSION = 4;
 const HISTORY_STORE_NAME = "history";
 const PROMPT_LIBRARY_STORE_NAME = "prompt-library";
 const FAVORITES_STORE_NAME = "favorites";
@@ -1392,15 +1392,42 @@ function App() {
           <div className="preview-head">
             <div>
               <h2>预览</h2>
-              <p>{request.width} × {request.height}</p>
+              <p>{request.width} × {request.height}{currentImage ? ` · ${formatBytes(currentImage.byteLen)}` : ""}</p>
             </div>
             <div className="preview-tools">
-              <button className="icon-button" title="适应窗口" type="button">
-                <Maximize2 aria-hidden="true" />
-              </button>
-              <button className="icon-button" title="缩放" type="button">
-                <ZoomIn aria-hidden="true" />
-              </button>
+              {currentImage ? (
+                <>
+                  <button
+                    className="icon-button"
+                    onClick={() => {
+                      const asset: ImageAsset = { name: currentImage.fileName, mimeType: currentImage.mimeType, base64: currentImage.base64 };
+                      update("sourceImage", asset);
+                      if (request.action === "generate") {
+                        update("action", "infill");
+                      }
+                      setMaskEditorOpen(true);
+                    }}
+                    title="局部重绘当前图片"
+                    type="button"
+                  >
+                    <Eraser aria-hidden="true" />
+                  </button>
+                  <button
+                    className={isImageFavorited(currentImage) ? "icon-button favorite active" : "icon-button favorite"}
+                    onClick={() => toggleFavorite(currentImage)}
+                    title={isImageFavorited(currentImage) ? "取消收藏" : "收藏图片"}
+                    type="button"
+                  >
+                    <Heart aria-hidden="true" />
+                  </button>
+                  <button className="icon-button" onClick={() => copyImage(currentImage)} title="复制图片" type="button">
+                    <Copy aria-hidden="true" />
+                  </button>
+                  <button className="icon-button filled" onClick={() => saveImage(currentImage)} title="保存图片" type="button">
+                    <Download aria-hidden="true" />
+                  </button>
+                </>
+              ) : null}
             </div>
           </div>
 
@@ -1419,39 +1446,6 @@ function App() {
               </div>
             )}
           </div>
-
-          <footer className="preview-footer">
-            <span>{currentImage ? formatBytes(currentImage.byteLen) : "未生成"}</span>
-            <div className="result-actions">
-              <button
-                className={currentImage && isImageFavorited(currentImage) ? "icon-button favorite active" : "icon-button favorite"}
-                disabled={!currentImage}
-                onClick={() => currentImage && toggleFavorite(currentImage)}
-                title={currentImage && isImageFavorited(currentImage) ? "取消收藏" : "收藏图片"}
-                type="button"
-              >
-                <Heart aria-hidden="true" />
-              </button>
-              <button
-                className="icon-button"
-                disabled={!currentImage}
-                onClick={() => currentImage && copyImage(currentImage)}
-                title="复制图片"
-                type="button"
-              >
-                <Copy aria-hidden="true" />
-              </button>
-              <button
-                className="icon-button filled"
-                disabled={!currentImage}
-                onClick={() => currentImage && saveImage(currentImage)}
-                title="保存图片"
-                type="button"
-              >
-                <Download aria-hidden="true" />
-              </button>
-            </div>
-          </footer>
         </section>
 
         <section className={historyOpen ? "history-card stage-history-card open" : "history-card stage-history-card"}>
@@ -1746,10 +1740,12 @@ function App() {
                       const isExpanded = expandedCharacterId === character.id;
                       return (
                         <div className="character-item" key={character.id}>
-                          <button
+                          <div
                             className="character-head"
                             onClick={() => setExpandedCharacterId(isExpanded ? null : character.id)}
-                            type="button"
+                            onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setExpandedCharacterId(isExpanded ? null : character.id); } }}
+                            role="button"
+                            tabIndex={0}
                           >
                             <strong>角色 {index + 1}</strong>
                             <span className="character-prompt-preview">
@@ -1767,7 +1763,7 @@ function App() {
                                 <Eraser aria-hidden="true" />
                               </button>
                             </div>
-                          </button>
+                          </div>
                           {isExpanded ? (
                             <>
                               <label className="field">
@@ -1871,9 +1867,42 @@ function App() {
                 <NumberField label="高度" value={request.height} min={64} max={2048} onChange={(value) => update("height", value)} />
                 <NumberField label="采样数" value={request.nSamples} min={1} max={8} onChange={(value) => update("nSamples", value)} />
               </div>
-              <div className="field-grid">
-                <OptionalNumberField label="种子" value={request.seed} min={0} max={4294967295} onChange={(value) => update("seed", value)} />
-              </div>
+              <label className="field compact">
+                <span>种子</span>
+                <div style={{ display: "flex", gap: 4 }}>
+                    <input
+                      type="number"
+                      value={request.seed ?? ""}
+                      min={0}
+                      max={4294967295}
+                      onChange={(event) => {
+                        const v = event.target.value.trim();
+                        update("seed", v === "" ? undefined : Number(v));
+                      }}
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      className="icon-button"
+                      onClick={() => update("seed", Math.floor(Math.random() * 4294967296))}
+                      title="随机种子"
+                      type="button"
+                      style={{ width: 32, height: 32, flexShrink: 0 }}
+                    >
+                      <RefreshCw aria-hidden="true" />
+                    </button>
+                    {request.seed !== undefined ? (
+                      <button
+                        className="icon-button"
+                        onClick={() => update("seed", undefined)}
+                        title="清除种子"
+                        type="button"
+                        style={{ width: 32, height: 32, flexShrink: 0 }}
+                      >
+                        <Eraser aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </div>
+                </label>
             </>
           ) : null}
         </section>
@@ -2483,15 +2512,20 @@ function MaskEditorModal(props: {
       return;
     }
 
-    for (const [canvas, color] of [[overlay, "rgba(255, 255, 255, 0.72)"], [mask, "#ffffff"]] as const) {
+    const halfBrush = brushSize / 2;
+    for (const [canvas, color, alpha] of [[overlay, "255, 255, 255", 0.72], [mask, "255, 255, 255", 1]] as const) {
       const context = canvas.getContext("2d");
       if (!context) {
         continue;
       }
       context.globalCompositeOperation = "source-over";
-      context.fillStyle = color;
+      const gradient = context.createRadialGradient(point.x, point.y, halfBrush * 0.2, point.x, point.y, halfBrush);
+      gradient.addColorStop(0, `rgba(${color}, ${alpha})`);
+      gradient.addColorStop(0.6, `rgba(${color}, ${alpha.toFixed(2)})`);
+      gradient.addColorStop(1, `rgba(${color}, 0)`);
+      context.fillStyle = gradient;
       context.beginPath();
-      context.arc(point.x, point.y, brushSize / 2, 0, Math.PI * 2);
+      context.arc(point.x, point.y, halfBrush, 0, Math.PI * 2);
       context.fill();
     }
   }
@@ -3397,6 +3431,9 @@ async function loadFavoritesFromIndexedDb(): Promise<FavoriteItem[]> {
 
   const db = await openHistoryDatabase();
   try {
+    if (!db.objectStoreNames.contains(FAVORITES_STORE_NAME)) {
+      return [];
+    }
     const tx = db.transaction(FAVORITES_STORE_NAME, "readonly");
     const store = tx.objectStore(FAVORITES_STORE_NAME);
     const items = (await requestToPromise<FavoriteItem[]>(store.getAll())) ?? [];

@@ -848,7 +848,7 @@ select:focus {
 
 .preview-card {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto 1fr;
   min-height: 0;
   overflow: hidden;
 }
@@ -884,7 +884,7 @@ select:focus {
 .image-viewer img {
   display: block;
   max-width: 100%;
-  max-height: calc(100vh - 258px);
+  max-height: calc(100vh - 210px);
   object-fit: contain;
   border: 1px solid #e3e6eb;
   border-radius: 7px;
@@ -1255,6 +1255,7 @@ select:focus {
 .mask-editor-canvas-wrap canvas {
   touch-action: none;
   cursor: crosshair;
+  border-radius: 0;
 }
 
 .mask-editor-canvas-wrap canvas[hidden] {
