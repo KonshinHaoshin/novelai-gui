@@ -876,6 +876,33 @@ function App() {
     }
   }
 
+  async function showRandomPromptEntries() {
+    const baseUrl = normalizeServerUrl(DEFAULT_SETTINGS.knowledgeServerUrl);
+    if (!baseUrl) {
+      setPromptLibraryStatus("素材库服务地址不可用。");
+      return;
+    }
+
+    setIsSearchingPromptLibrary(true);
+    setPromptLibraryStatus(null);
+    try {
+      const cached = await loadPromptLibraryCache(promptLibraryType);
+      const entries = cached?.entries ?? await fetchPromptLibraryEntries(promptLibraryType);
+      if (cached) {
+        await savePromptLibraryCache({ type: promptLibraryType, entries, updatedAt: new Date().toISOString(), serverUrl: baseUrl });
+      }
+      const shuffled = [...entries].sort(() => Math.random() - 0.5);
+      const count = Math.min(8, shuffled.length);
+      setPromptLibraryResults(shuffled.slice(0, count));
+      setPromptLibraryVisibleCount(count);
+      setPromptLibraryStatus(`随机推荐 ${count} 条，刷新可更换。`);
+    } catch (error) {
+      setPromptLibraryStatus(String(error));
+    } finally {
+      setIsSearchingPromptLibrary(false);
+    }
+  }
+
   const visiblePromptLibraryResults = promptLibraryResults.slice(0, promptLibraryVisibleCount);
 
   function togglePromptEntry(entry: PromptLibraryEntry) {
@@ -1053,8 +1080,24 @@ function App() {
     setActiveImages([]);
     setSelectedImage(0);
     void saveHistoryToIndexedDb([]);
-    showNotice("success", "历史记录已清除。");
     writeAppLog("info", "history", "已清除历史记录。");
+  }
+
+  function removeHistoryItem(itemId: string, imageIndex: number) {
+    setHistory((items) => {
+      const next = items.map((item) => {
+        if (item.id !== itemId) {
+          return item;
+        }
+        const images = item.images.filter((_, index) => index !== imageIndex);
+        return images.length > 0 ? { ...item, images } : null;
+      }).filter((item): item is HistoryItem => item !== null);
+      void saveHistoryToIndexedDb(next);
+      return next;
+    });
+    if (activeImages.length > 0 && selectedImage >= activeImages.length - 1 && selectedImage > 0) {
+      setSelectedImage((current) => current - 1);
+    }
   }
 
   function writeAppLog(level: "info" | "success" | "warning" | "error", source: string, message: string) {
@@ -1473,15 +1516,27 @@ function App() {
                 <div className="history-list image-only">
                   {visibleHistory.flatMap((item) =>
                     item.images.map((image, imageIndex) => (
-                      <button
-                        className={currentImage?.base64 === image.base64 ? "history-thumb active" : "history-thumb"}
-                        key={`${item.id}-${image.fileName}-${imageIndex}`}
-                        onClick={() => reuse(item, imageIndex)}
-                        title={new Date(item.createdAt).toLocaleString()}
-                        type="button"
-                      >
-                        <img src={`data:${image.mimeType};base64,${image.base64}`} alt="" />
-                      </button>
+                      <div className="history-thumb-wrap" key={`${item.id}-${image.fileName}-${imageIndex}`}>
+                        <button
+                          className={currentImage?.base64 === image.base64 ? "history-thumb active" : "history-thumb"}
+                          onClick={() => reuse(item, imageIndex)}
+                          title={new Date(item.createdAt).toLocaleString()}
+                          type="button"
+                        >
+                          <img src={`data:${image.mimeType};base64,${image.base64}`} alt="" />
+                        </button>
+                        <button
+                          className="history-thumb-delete"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeHistoryItem(item.id, imageIndex);
+                          }}
+                          title="删除此记录"
+                          type="button"
+                        >
+                          ×
+                        </button>
+                      </div>
                     )),
                   )}
                 </div>
@@ -1869,40 +1924,37 @@ function App() {
               </div>
               <label className="field compact">
                 <span>种子</span>
-                <div style={{ display: "flex", gap: 4 }}>
-                    <input
-                      type="number"
-                      value={request.seed ?? ""}
-                      min={0}
-                      max={4294967295}
-                      onChange={(event) => {
-                        const v = event.target.value.trim();
-                        update("seed", v === "" ? undefined : Number(v));
-                      }}
-                      style={{ flex: 1 }}
-                    />
+                <div className="seed-control">
+                  <input
+                    type="number"
+                    value={request.seed ?? ""}
+                    min={0}
+                    max={4294967295}
+                    onChange={(event) => {
+                      const v = event.target.value.trim();
+                      update("seed", v === "" ? undefined : Number(v));
+                    }}
+                  />
+                  <button
+                    className="icon-button"
+                    onClick={() => update("seed", Math.floor(Math.random() * 4294967296))}
+                    title="随机种子"
+                    type="button"
+                  >
+                    <RefreshCw aria-hidden="true" />
+                  </button>
+                  {request.seed !== undefined ? (
                     <button
                       className="icon-button"
-                      onClick={() => update("seed", Math.floor(Math.random() * 4294967296))}
-                      title="随机种子"
+                      onClick={() => update("seed", undefined)}
+                      title="清除种子"
                       type="button"
-                      style={{ width: 32, height: 32, flexShrink: 0 }}
                     >
-                      <RefreshCw aria-hidden="true" />
+                      <Eraser aria-hidden="true" />
                     </button>
-                    {request.seed !== undefined ? (
-                      <button
-                        className="icon-button"
-                        onClick={() => update("seed", undefined)}
-                        title="清除种子"
-                        type="button"
-                        style={{ width: 32, height: 32, flexShrink: 0 }}
-                      >
-                        <Eraser aria-hidden="true" />
-                      </button>
-                    ) : null}
-                  </div>
-                </label>
+                  ) : null}
+                </div>
+              </label>
             </>
           ) : null}
         </section>
@@ -1977,109 +2029,132 @@ function App() {
             <div>
               <p className="eyebrow">Prompt Library</p>
               <h2>Prompt 助手</h2>
-              <span>画风单选替换，场景和服装会累积到下方已选框。</span>
             </div>
           </header>
 
           <section className="settings-panel prompt-library-panel">
-            <div className="section-head">
-              <WandSparkles aria-hidden="true" />
-              <h2>素材查询</h2>
-            </div>
+            <div className="prompt-library-fixed-top">
+              <div className="section-head">
+                <WandSparkles aria-hidden="true" />
+                <h2>素材查询</h2>
+              </div>
 
-            <div className="prompt-library-tabs">
-              {PROMPT_ENTRY_TYPES.map((item) => (
-                <button
-                  className={promptLibraryType === item.type ? "chip active" : "chip"}
-                  key={item.type}
-                  onClick={() => {
-                    setPromptLibraryType(item.type);
-                    setPromptLibraryResults([]);
-                    setPromptLibraryStatus(null);
-                    setPromptLibraryQuery("");
+              <div className="prompt-library-tabs">
+                {PROMPT_ENTRY_TYPES.map((item) => (
+                  <button
+                    className={promptLibraryType === item.type ? "chip active" : "chip"}
+                    key={item.type}
+                    onClick={() => {
+                      setPromptLibraryType(item.type);
+                      setPromptLibraryResults([]);
+                      setPromptLibraryStatus(null);
+                      setPromptLibraryQuery("");
+                    }}
+                    type="button"
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="prompt-library-search">
+                <input
+                  value={promptLibraryQuery}
+                  onChange={(event) => setPromptLibraryQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void searchPromptLibrary();
+                    }
                   }}
-                  type="button"
-                >
-                  {item.label}
+                  placeholder="搜索 wlop、坐姿、女仆..."
+                />
+                <button className="icon-button filled" onClick={() => void searchPromptLibrary()} disabled={isSearchingPromptLibrary} title="搜索" type="button">
+                  {isSearchingPromptLibrary ? <Loader2 className="spin" aria-hidden="true" /> : <Search aria-hidden="true" />}
                 </button>
-              ))}
-            </div>
-
-            <div className="prompt-library-search">
-              <input
-                value={promptLibraryQuery}
-                onChange={(event) => setPromptLibraryQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    void searchPromptLibrary();
-                  }
-                }}
-                placeholder="搜索 wlop、坐姿、女仆..."
-              />
-              <button className="icon-button filled" onClick={() => void searchPromptLibrary()} disabled={isSearchingPromptLibrary} title="搜索" type="button">
-                {isSearchingPromptLibrary ? <Loader2 className="spin" aria-hidden="true" /> : <Search aria-hidden="true" />}
-              </button>
-              <button
-                className="icon-button"
-                onClick={() => void searchPromptLibrary({ forceRefresh: true })}
-                disabled={isSearchingPromptLibrary}
-                title="刷新并保存素材库"
-                type="button"
-              >
-                <RefreshCw className={isSearchingPromptLibrary ? "spin" : ""} aria-hidden="true" />
-              </button>
-            </div>
-
-            {promptLibraryStatus ? <div className="prompt-library-status">{promptLibraryStatus}</div> : null}
-
-            <div className="prompt-library-selection">
-              <span>画风：{selectedPromptEntries.style?.title ?? "未选择"}</span>
-              <span>场景：{selectedPromptBoxes.scene.length > 0 ? String(selectedPromptBoxes.scene.length) + " 项" : "未选择"}</span>
-              <span>服装：{selectedPromptBoxes.clothing.length > 0 ? String(selectedPromptBoxes.clothing.length) + " 项" : "未选择"}</span>
-            </div>
-
-            <div className="prompt-library-results">
-              {visiblePromptLibraryResults.map((entry) => (
                 <button
-                  className={isPromptEntrySelected(entry, selectedPromptEntries, selectedPromptBoxes) ? "prompt-library-item active" : "prompt-library-item"}
-                  key={entry.slug}
-                  onClick={() => togglePromptEntry(entry)}
+                  className="icon-button"
+                  onClick={() => void showRandomPromptEntries()}
+                  disabled={isSearchingPromptLibrary}
+                  title="随机推荐"
                   type="button"
                 >
-                  <strong>{entry.title}</strong>
-                  <span>{entry.category?.name ?? promptEntryTypeLabel(entry.entry_type)} · {entry.source?.title ?? "本地素材库"}</span>
-                  <PromptEntryImages entry={entry} />
-                  <em>{entry.prompt}</em>
+                  {isSearchingPromptLibrary ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
                 </button>
-              ))}
+                <button
+                  className="icon-button"
+                  onClick={() => void searchPromptLibrary({ forceRefresh: true })}
+                  disabled={isSearchingPromptLibrary}
+                  title="刷新并保存素材库"
+                  type="button"
+                >
+                  <RefreshCw className={isSearchingPromptLibrary ? "spin" : ""} aria-hidden="true" />
+                </button>
+              </div>
+
+              {promptLibraryStatus ? <div className="prompt-library-status">{promptLibraryStatus}</div> : null}
+
+              <div className="prompt-library-selection">
+                <span>画风：{selectedPromptEntries.style?.title ?? "未选择"}</span>
+                <span>场景：{selectedPromptBoxes.scene.length > 0 ? String(selectedPromptBoxes.scene.length) + " 项" : "未选择"}</span>
+                <span>服装：{selectedPromptBoxes.clothing.length > 0 ? String(selectedPromptBoxes.clothing.length) + " 项" : "未选择"}</span>
+              </div>
             </div>
 
-            {promptLibraryVisibleCount < promptLibraryResults.length ? (
-              <button
-                className="ghost-button wide-button"
-                onClick={() => setPromptLibraryVisibleCount((count) => Math.min(count + PROMPT_LIBRARY_PAGE_SIZE, promptLibraryResults.length))}
-                type="button"
-              >
-                加载更多（{promptLibraryVisibleCount}/{promptLibraryResults.length}）
-              </button>
-            ) : null}
+            <div className="prompt-library-results-scroll">
+              <div className="prompt-library-results">
+                {visiblePromptLibraryResults.map((entry) => (
+                  <button
+                    className={isPromptEntrySelected(entry, selectedPromptEntries, selectedPromptBoxes) ? "prompt-library-item active" : "prompt-library-item"}
+                    key={entry.slug}
+                    onClick={() => togglePromptEntry(entry)}
+                    type="button"
+                  >
+                    <strong>{entry.title}</strong>
+                    <span>{entry.category?.name ?? promptEntryTypeLabel(entry.entry_type)} · {entry.source?.title ?? "本地素材库"}</span>
+                    <PromptEntryImages entry={entry} />
+                    <em>{entry.prompt}</em>
+                  </button>
+                ))}
+              </div>
+
+              {promptLibraryVisibleCount < promptLibraryResults.length ? (
+                <button
+                  className="ghost-button wide-button"
+                  onClick={() => setPromptLibraryVisibleCount((count) => Math.min(count + PROMPT_LIBRARY_PAGE_SIZE, promptLibraryResults.length))}
+                  type="button"
+                >
+                  加载更多（{promptLibraryVisibleCount}/{promptLibraryResults.length}）
+                </button>
+              ) : null}
+            </div>
 
             <div className="prompt-library-output">
               <label className="field">
                 <span>已选画风</span>
-                <textarea readOnly rows={2} value={selectedPromptEntries.style?.prompt?.trim() ?? ""} placeholder="未选择画风" />
+                <textarea
+                  rows={2}
+                  value={selectedPromptEntries.style?.prompt?.trim() ?? ""}
+                  onChange={(event) => {
+                    const style = selectedPromptEntries.style;
+                    if (style) {
+                      setSelectedPromptEntries((current) => ({
+                        ...current,
+                        style: { ...style, prompt: event.target.value },
+                      }));
+                    }
+                  }}
+                  placeholder="未选择画风"
+                />
               </label>
               <label className="field">
                 <span>已选场景/服装</span>
-                <textarea readOnly rows={4} value={buildPromptSelectionText(undefined, selectedPromptBoxes)} placeholder="未选择场景或服装" />
+                <textarea rows={3} value={buildPromptSelectionText(undefined, selectedPromptBoxes)} placeholder="未选择场景或服装" readOnly />
               </label>
               <button className="ghost-button wide-button" onClick={() => updateMainPromptFromSelection()} type="button">
                 写入提示词
               </button>
             </div>
           </section>
-
-          {notice ? <div className={`notice settings-notice ${notice.type}`}>{notice.message}</div> : null}
         </section>
       ) : activePanel === "favorites" ? (
         <section className="favorites-page" aria-label="Favorite gallery">
@@ -2444,7 +2519,15 @@ function MaskEditorModal(props: {
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawingRef = useRef(false);
+  const rectStartRef = useRef<{ x: number; y: number } | null>(null);
+  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const overlaySnapshotRef = useRef<ImageData | null>(null);
+  const maskSnapshotRef = useRef<ImageData | null>(null);
   const [brushSize, setBrushSize] = useState(56);
+  const [brushMode, setBrushMode] = useState<"paint" | "erase">("paint");
+  const [maskTool, setMaskTool] = useState<"brush" | "rect">("brush");
+  const [brushShape, setBrushShape] = useState<"round" | "square">("round");
+  const [maskGrow, setMaskGrow] = useState(8);
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
 
   function initializeMask(width: number, height: number) {
@@ -2481,9 +2564,9 @@ function MaskEditorModal(props: {
         const overlayPixels = overlayContext.createImageData(width, height);
         for (let index = 0; index < pixels.data.length; index += 4) {
           const selected = pixels.data[index] > 16 || pixels.data[index + 1] > 16 || pixels.data[index + 2] > 16;
-          overlayPixels.data[index] = 255;
-          overlayPixels.data[index + 1] = 255;
-          overlayPixels.data[index + 2] = 255;
+          overlayPixels.data[index] = 34;
+          overlayPixels.data[index + 1] = 188;
+          overlayPixels.data[index + 2] = 202;
           overlayPixels.data[index + 3] = selected ? 184 : 0;
         }
         overlayContext.putImageData(overlayPixels, 0, 0);
@@ -2513,20 +2596,81 @@ function MaskEditorModal(props: {
     }
 
     const halfBrush = brushSize / 2;
-    for (const [canvas, color, alpha] of [[overlay, "255, 255, 255", 0.72], [mask, "255, 255, 255", 1]] as const) {
+    for (const [canvas, visualAlpha] of [[overlay, 0.72], [mask, 1]] as const) {
       const context = canvas.getContext("2d");
       if (!context) {
         continue;
       }
-      context.globalCompositeOperation = "source-over";
-      const gradient = context.createRadialGradient(point.x, point.y, halfBrush * 0.2, point.x, point.y, halfBrush);
-      gradient.addColorStop(0, `rgba(${color}, ${alpha})`);
-      gradient.addColorStop(0.6, `rgba(${color}, ${alpha.toFixed(2)})`);
-      gradient.addColorStop(1, `rgba(${color}, 0)`);
-      context.fillStyle = gradient;
-      context.beginPath();
-      context.arc(point.x, point.y, halfBrush, 0, Math.PI * 2);
-      context.fill();
+      context.globalCompositeOperation = brushMode === "erase" ? "destination-out" : "source-over";
+
+      const color = brushMode === "erase"
+        ? "0, 0, 0"
+        : canvas === overlay ? "34, 188, 202" : "255, 255, 255";
+      if (brushShape === "square") {
+        context.fillStyle = `rgba(${color}, ${visualAlpha})`;
+        context.fillRect(point.x - halfBrush, point.y - halfBrush, brushSize, brushSize);
+      } else {
+        context.fillStyle = `rgba(${color}, ${visualAlpha})`;
+        context.beginPath();
+        context.arc(point.x, point.y, halfBrush, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+  }
+
+  function drawBetween(from: { x: number; y: number }, to: { x: number; y: number }) {
+    const distance = Math.hypot(to.x - from.x, to.y - from.y);
+    const steps = Math.max(1, Math.ceil(distance / Math.max(4, brushSize / 3)));
+    for (let step = 0; step <= steps; step += 1) {
+      const ratio = step / steps;
+      drawAt({
+        x: from.x + (to.x - from.x) * ratio,
+        y: from.y + (to.y - from.y) * ratio,
+      });
+    }
+  }
+
+  function snapshotMaskCanvases() {
+    const overlay = overlayCanvasRef.current;
+    const mask = maskCanvasRef.current;
+    overlaySnapshotRef.current = overlay?.getContext("2d")?.getImageData(0, 0, overlay.width, overlay.height) ?? null;
+    maskSnapshotRef.current = mask?.getContext("2d")?.getImageData(0, 0, mask.width, mask.height) ?? null;
+  }
+
+  function restoreMaskCanvases() {
+    const overlay = overlayCanvasRef.current;
+    const mask = maskCanvasRef.current;
+    if (overlay && overlaySnapshotRef.current) {
+      overlay.getContext("2d")?.putImageData(overlaySnapshotRef.current, 0, 0);
+    }
+    if (mask && maskSnapshotRef.current) {
+      mask.getContext("2d")?.putImageData(maskSnapshotRef.current, 0, 0);
+    }
+  }
+
+  function fillRectSelection(start: { x: number; y: number }, end: { x: number; y: number }) {
+    const overlay = overlayCanvasRef.current;
+    const mask = maskCanvasRef.current;
+    if (!overlay || !mask) {
+      return;
+    }
+
+    restoreMaskCanvases();
+    const x = Math.min(start.x, end.x);
+    const y = Math.min(start.y, end.y);
+    const width = Math.abs(end.x - start.x);
+    const height = Math.abs(end.y - start.y);
+    for (const [canvas, color, visualAlpha] of [
+      [overlay, "34, 188, 202", 0.72],
+      [mask, "255, 255, 255", 1],
+    ] as const) {
+      const context = canvas.getContext("2d");
+      if (!context) {
+        continue;
+      }
+      context.globalCompositeOperation = brushMode === "erase" ? "destination-out" : "source-over";
+      context.fillStyle = `rgba(${color}, ${visualAlpha})`;
+      context.fillRect(x, y, width, height);
     }
   }
 
@@ -2537,7 +2681,14 @@ function MaskEditorModal(props: {
     }
     drawingRef.current = true;
     event.currentTarget.setPointerCapture(event.pointerId);
-    drawAt(point);
+    rectStartRef.current = point;
+    lastPointRef.current = point;
+    if (maskTool === "rect") {
+      snapshotMaskCanvases();
+      fillRectSelection(point, point);
+    } else {
+      drawAt(point);
+    }
   }
 
   function handlePointerMove(event: PointerEvent<HTMLCanvasElement>) {
@@ -2546,12 +2697,24 @@ function MaskEditorModal(props: {
     }
     const point = pointFromEvent(event);
     if (point) {
-      drawAt(point);
+      if (maskTool === "rect" && rectStartRef.current) {
+        fillRectSelection(rectStartRef.current, point);
+      } else if (lastPointRef.current) {
+        drawBetween(lastPointRef.current, point);
+        lastPointRef.current = point;
+      } else {
+        drawAt(point);
+        lastPointRef.current = point;
+      }
     }
   }
 
   function stopDrawing() {
     drawingRef.current = false;
+    rectStartRef.current = null;
+    lastPointRef.current = null;
+    overlaySnapshotRef.current = null;
+    maskSnapshotRef.current = null;
   }
 
   function clearMask() {
@@ -2577,9 +2740,18 @@ function MaskEditorModal(props: {
     const context = mask.getContext("2d");
     if (context) {
       const pixels = context.getImageData(0, 0, mask.width, mask.height);
+      const selected = new Uint8Array(mask.width * mask.height);
       for (let index = 0; index < pixels.data.length; index += 4) {
-        const selected = pixels.data[index] > 16 || pixels.data[index + 1] > 16 || pixels.data[index + 2] > 16;
-        const value = selected ? 255 : 0;
+        selected[index / 4] =
+          pixels.data[index + 3] > 16 &&
+          (pixels.data[index] > 16 || pixels.data[index + 1] > 16 || pixels.data[index + 2] > 16)
+            ? 1
+            : 0;
+      }
+
+      const grownSelected = growMaskSelection(selected, mask.width, mask.height, maskGrow);
+      for (let index = 0; index < pixels.data.length; index += 4) {
+        const value = grownSelected[index / 4] ? 255 : 0;
         pixels.data[index] = value;
         pixels.data[index + 1] = value;
         pixels.data[index + 2] = value;
@@ -2629,14 +2801,68 @@ function MaskEditorModal(props: {
         </div>
 
         <footer className="mask-editor-footer">
+          <div className="mask-tool-grid">
+            <button
+              className={maskTool === "brush" ? "chip active" : "chip"}
+              onClick={() => setMaskTool("brush")}
+              type="button"
+            >
+              画笔
+            </button>
+            <button
+              className={maskTool === "rect" ? "chip active" : "chip"}
+              onClick={() => setMaskTool("rect")}
+              type="button"
+            >
+              矩形填充
+            </button>
+            <button
+              className={brushMode === "paint" ? "chip active" : "chip"}
+              onClick={() => setBrushMode("paint")}
+              type="button"
+            >
+              绘制
+            </button>
+            <button
+              className={brushMode === "erase" ? "chip active" : "chip"}
+              onClick={() => setBrushMode("erase")}
+              type="button"
+            >
+              擦除
+            </button>
+            <button
+              className={brushShape === "round" ? "chip active" : "chip"}
+              onClick={() => setBrushShape("round")}
+              type="button"
+            >
+              圆形
+            </button>
+            <button
+              className={brushShape === "square" ? "chip active" : "chip"}
+              onClick={() => setBrushShape("square")}
+              type="button"
+            >
+              方形
+            </button>
+          </div>
           <label className="field compact">
-            <span>画笔</span>
+            <span>大小</span>
             <input
               type="range"
               min={8}
               max={180}
               value={brushSize}
               onChange={(event) => setBrushSize(Number(event.target.value))}
+            />
+          </label>
+          <label className="field compact">
+            <span>边缘扩展</span>
+            <input
+              type="range"
+              min={0}
+              max={32}
+              value={maskGrow}
+              onChange={(event) => setMaskGrow(Number(event.target.value))}
             />
           </label>
           <button className="ghost-button" onClick={clearMask} type="button">
@@ -2652,6 +2878,42 @@ function MaskEditorModal(props: {
       </section>
     </div>
   );
+}
+
+function growMaskSelection(source: Uint8Array, width: number, height: number, radius: number) {
+  const steps = Math.max(0, Math.round(radius));
+  if (steps === 0) {
+    return source;
+  }
+
+  const output = new Uint8Array(source);
+  const radiusSquared = steps * steps;
+  const offsets: Array<[number, number]> = [];
+  for (let y = -steps; y <= steps; y += 1) {
+    for (let x = -steps; x <= steps; x += 1) {
+      if (x * x + y * y <= radiusSquared) {
+        offsets.push([x, y]);
+      }
+    }
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (!source[y * width + x]) {
+        continue;
+      }
+
+      for (const [offsetX, offsetY] of offsets) {
+        const nextX = x + offsetX;
+        const nextY = y + offsetY;
+        if (nextX >= 0 && nextX < width && nextY >= 0 && nextY < height) {
+          output[nextY * width + nextX] = 1;
+        }
+      }
+    }
+  }
+
+  return output;
 }
 
 function PromptEntryImages(props: { entry: PromptLibraryEntry }) {

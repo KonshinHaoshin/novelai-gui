@@ -204,6 +204,8 @@ h2 {
   align-items: center;
   gap: 14px;
   min-height: calc(100vh - 28px);
+  max-height: calc(100vh - 28px);
+  overflow: hidden;
 }
 
 .brand-card,
@@ -224,9 +226,21 @@ h2 {
 
 .settings-header {
   width: 100%;
-  max-width: 980px;
+  max-width: 1540px;
   min-height: 104px;
   padding: 22px 24px;
+  flex-shrink: 0;
+}
+
+.prompt-library-panel {
+  width: min(1520px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px 18px;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
 }
 
 .settings-header h2 {
@@ -528,6 +542,7 @@ textarea {
 input,
 select {
   height: 38px;
+  min-width: 0;
   padding: 0 10px;
 }
 
@@ -600,17 +615,27 @@ select:focus {
 
 .prompt-library-panel {
   width: min(760px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px 18px;
+  gap: 10px;
+}
+
+.prompt-library-fixed-top {
+  flex-shrink: 0;
 }
 
 .prompt-library-tabs {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+  margin-top: 12px;
 }
 
 .prompt-library-search {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 38px 38px;
+  grid-template-columns: minmax(0, 1fr) 38px 38px 38px;
   align-items: center;
   gap: 8px;
 }
@@ -657,18 +682,28 @@ select:focus {
 .prompt-library-output {
   display: grid;
   gap: 10px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 12px;
 }
 
 .prompt-library-output textarea {
-  min-height: 120px;
+  min-height: 48px;
+  max-height: 80px;
+}
+
+.prompt-library-results-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 10px;
 }
 
 .prompt-library-results {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  max-height: min(520px, 55vh);
-  overflow: auto;
 }
 
 .prompt-library-item {
@@ -999,6 +1034,7 @@ select:focus {
   display: flex;
   flex-direction: column;
   gap: 7px;
+  min-width: 0;
 }
 
 .field span {
@@ -1015,6 +1051,19 @@ select:focus {
 
 .field-grid.four {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.seed-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px 36px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.seed-control .icon-button {
+  width: 36px;
+  height: 36px;
 }
 
 .preset-row,
@@ -1207,6 +1256,7 @@ select:focus {
   align-items: center;
   gap: 12px;
   padding: 14px;
+  flex-wrap: wrap;
 }
 
 .mask-editor-head {
@@ -1265,6 +1315,12 @@ select:focus {
 .mask-editor-footer {
   justify-content: flex-end;
   border-top: 1px solid var(--line);
+}
+
+.mask-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(72px, 1fr));
+  gap: 8px;
 }
 
 .mask-editor-footer .field {
@@ -1400,6 +1456,35 @@ select:focus {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.history-thumb-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.history-thumb-delete {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: #d94a4a;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  z-index: 1;
+}
+
+.history-thumb-wrap:hover .history-thumb-delete {
+  display: flex;
 }
 
 .history-empty-inline {
