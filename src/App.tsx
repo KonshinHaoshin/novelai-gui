@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Braces,
   ChevronDown,
+  ChevronsLeft,
+  ChevronsRight,
   Copy,
   Download,
   Eraser,
@@ -371,6 +373,7 @@ function App() {
   const [upscaleScale, setUpscaleScale] = useState<2 | 4>(2);
   const [directorToolType, setDirectorToolType] = useState<DirectorToolType>("lineart");
   const [maskEditorOpen, setMaskEditorOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -1223,7 +1226,7 @@ function App() {
   }
 
   return (
-    <main className="studio-shell">
+    <main className={sidebarCollapsed ? "app-shell collapsed" : "app-shell"}>
       <input
         ref={importInputRef}
         accept="image/png,image/webp"
@@ -1269,10 +1272,27 @@ function App() {
         tabIndex={-1}
         type="file"
       />
-      <nav className="nav-rail" aria-label="Main navigation">
-        <div className="nav-logo">
-          <img src={appIcon} alt="NovelAI GUI" />
+      <header className="app-titlebar">
+        <div className="titlebar-spacer" />
+        <div className={hasToken ? "api-status-pill" : "api-status-pill missing"}>
+          <span className="api-status-dot" />
+          <span>
+            {hasToken
+              ? `API 已连接${account?.tier ? ` · ${account.tier}` : ""}${account?.points !== undefined ? ` · ${formatPoints(account.points)} 点` : ""}`
+              : "未设置 API Token"}
+          </span>
         </div>
+      </header>
+
+      <div className="app-body">
+      <nav className={sidebarCollapsed ? "app-sidebar collapsed" : "app-sidebar"} aria-label="Main navigation">
+        <div className="nav-brand">
+          <div className="nav-orb">
+            <img src={appIcon} alt="NovelAI GUI" />
+          </div>
+          {!sidebarCollapsed ? <span className="nav-title">NOVELAI GUI</span> : null}
+        </div>
+        <div className="nav-list">
         <button
           className={activePanel === "generate" ? "nav-button active" : "nav-button"}
           onClick={() => setActivePanel("generate")}
@@ -1280,6 +1300,7 @@ function App() {
           type="button"
         >
           <Images aria-hidden="true" />
+          {!sidebarCollapsed ? <span className="nav-label">图像生成</span> : null}
         </button>
         <button
           className={activePanel === "promptLibrary" ? "nav-button active" : "nav-button"}
@@ -1288,6 +1309,7 @@ function App() {
           type="button"
         >
           <WandSparkles aria-hidden="true" />
+          {!sidebarCollapsed ? <span className="nav-label">Prompt 助手</span> : null}
         </button>
         <button
           className={activePanel === "settings" ? "nav-button active" : "nav-button"}
@@ -1296,6 +1318,7 @@ function App() {
           type="button"
         >
           <Settings2 aria-hidden="true" />
+          {!sidebarCollapsed ? <span className="nav-label">设置</span> : null}
         </button>
         <button
           className={activePanel === "favorites" ? "nav-button active" : "nav-button"}
@@ -1304,23 +1327,50 @@ function App() {
           type="button"
         >
           <Heart aria-hidden="true" />
+          {!sidebarCollapsed ? <span className="nav-label">收藏画廊</span> : null}
         </button>
-        <div className="nav-spacer" />
+        </div>
+        <div className="nav-foot">
+          <button className="nav-collapse" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} type="button" aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}>
+            {sidebarCollapsed ? (
+              <ChevronsRight aria-hidden="true" />
+            ) : (
+              <>
+                <ChevronsLeft aria-hidden="true" />
+                <span>收起</span>
+              </>
+            )}
+          </button>
+        </div>
       </nav>
 
-      {activePanel === "generate" ? (
-        <>
-      <aside className="prompt-rail" aria-label="Prompt workspace">
-        <section className="brand-card">
-          <div className="brand-icon">
-            <Sparkles aria-hidden="true" />
-          </div>
-          <div>
-            <h1>NovelAI GUI</h1>
-            <p>AI Image Generation</p>
-          </div>
-        </section>
+      <div className="app-workspace">
 
+      {activePanel === "generate" ? (
+        <div className="generate-workspace">
+        <div className="workbench-tabs">
+          {([
+            ["generate", "文生图"],
+            ["img2img", "图生图"],
+            ["infill", "局部重绘"],
+          ] as Array<[ImageAction, string]>).map(([action, label]) => (
+            <button
+              className={request.action === action ? "workbench-tab active" : "workbench-tab"}
+              key={action}
+              onClick={() => {
+                update("action", action);
+                if (action === "infill" && request.strength < 1) {
+                  update("strength", 1);
+                }
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="workbench">
+      <aside className="prompt-rail" aria-label="Prompt workspace">
         {stylePromptOpen ? (
           <section className="prompt-card compact">
             <button className="section-toggle" onClick={() => setStylePromptOpen(false)} type="button">
@@ -1595,27 +1645,7 @@ function App() {
             <ImagePlus aria-hidden="true" />
             <h2>输入模式</h2>
           </div>
-          <div className="preset-row">
-            {([
-              ["generate", "文生图"],
-              ["img2img", "图生图"],
-              ["infill", "局部重绘"],
-            ] as Array<[ImageAction, string]>).map(([action, label]) => (
-              <button
-                className={request.action === action ? "chip active" : "chip"}
-                key={action}
-                onClick={() => {
-                  update("action", action);
-                  if (action === "infill" && request.strength < 1) {
-                    update("strength", 1);
-                  }
-                }}
-                type="button"
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <p className="mode-hint">生成模式在工作台顶部切换，下方显示对应输入设置。</p>
           {request.action !== "generate" ? (
             <div className="tool-stack">
               <div className={request.action === "infill" ? "asset-picker-row" : undefined}>
@@ -2026,7 +2056,8 @@ function App() {
           </section>
         ) : null}
       </aside>
-        </>
+        </div>
+        </div>
       ) : activePanel === "promptLibrary" ? (
         <section className="prompt-library-page" aria-label="Prompt library">
           <header className="settings-header">
@@ -2369,6 +2400,9 @@ function App() {
           {notice ? <div className={`notice settings-notice ${notice.type}`}>{notice.message}</div> : null}
         </section>
       )}
+      </div>
+      </div>
+
       {maskEditorOpen && request.sourceImage ? (
         <MaskEditorModal
           sourceImage={request.sourceImage}
