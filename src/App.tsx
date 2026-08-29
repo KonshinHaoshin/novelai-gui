@@ -27,6 +27,7 @@ import {
   Users,
   WandSparkles,
   ZoomIn,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, PointerEvent } from "react";
@@ -317,10 +318,14 @@ const SAMPLERS = [
 const NOISE_SCHEDULES = ["native", "karras", "exponential", "polyexponential"];
 
 const SIZE_PRESETS = [
-  { label: "竖屏", width: 832, height: 1216 },
-  { label: "正方形", width: 1024, height: 1024 },
-  { label: "横屏", width: 1216, height: 832 },
+  { label: "1:1", width: 1024, height: 1024 },
+  { label: "3:4", width: 896, height: 1152 },
+  { label: "4:3", width: 1152, height: 896 },
+  { label: "16:9", width: 1216, height: 684 },
+  { label: "9:16", width: 832, height: 1216 },
 ];
+
+const QUICK_TEMPLATES = ["格子衫", "1999", "Youhua", "love", "米山舞", "loli2", "loli", "帅", "Yuege", "恋人不行", "色气04", "biya"];
 
 function App() {
   const [request, setRequest] = useState<ImageRequest>(DEFAULT_REQUEST);
@@ -332,13 +337,13 @@ function App() {
   const [hasToken, setHasToken] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [apiToolsOpen, setApiToolsOpen] = useState(true);
   const [characterOpen, setCharacterOpen] = useState(false);
   const [expandedCharacterId, setExpandedCharacterId] = useState<string | null>(null);
   const [stylePromptOpen, setStylePromptOpen] = useState(true);
   const [sizePresetOpen, setSizePresetOpen] = useState(true);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(true);
   const [activePanel, setActivePanel] = useState<"generate" | "promptLibrary" | "settings" | "favorites">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [account, setAccount] = useState<AccountSummary | null>(null);
@@ -374,6 +379,7 @@ function App() {
   const [directorToolType, setDirectorToolType] = useState<DirectorToolType>("lineart");
   const [maskEditorOpen, setMaskEditorOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [parameterDrawerOpen, setParameterDrawerOpen] = useState(false);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -458,6 +464,27 @@ function App() {
 
     void searchPromptLibrary({ type: promptLibraryType, query: "" });
   }, [activePanel, promptLibraryType]);
+
+  useEffect(() => {
+    if (!parameterDrawerOpen) {
+      return;
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setParameterDrawerOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [parameterDrawerOpen]);
+
+  useEffect(() => {
+    if (activePanel !== "generate") {
+      setParameterDrawerOpen(false);
+    }
+  }, [activePanel]);
 
   const currentImage = activeImages[selectedImage];
   const visibleHistory = history.slice(0, settings.historyDisplayLimit);
@@ -585,6 +612,20 @@ function App() {
       setIsGenerating(false);
     }
   }
+
+  useEffect(() => {
+    const handleGenerateShortcut = (event: KeyboardEvent) => {
+      if (activePanel !== "generate" || !(event.metaKey || event.ctrlKey) || event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      void generate();
+    };
+
+    window.addEventListener("keydown", handleGenerateShortcut);
+    return () => window.removeEventListener("keydown", handleGenerateShortcut);
+  }, [activePanel, canGenerate, request, settings]);
 
   async function saveImage(image: GeneratedImage) {
     if (!isTauriRuntime()) {
@@ -1365,15 +1406,206 @@ function App() {
               }}
               type="button"
             >
+              <Images aria-hidden="true" />
               {label}
             </button>
           ))}
         </div>
         <div className="workbench">
       <aside className="prompt-rail" aria-label="Prompt workspace">
+        <div className="prompt-scroll">
+        <section className="parameter-card model-card">
+          <div className="section-head">
+            <Images aria-hidden="true" />
+            <h2>模型</h2>
+          </div>
+
+          <label className="field">
+            <span>模型</span>
+            <select value={request.model} onChange={(event) => update("model", event.target.value)}>
+              {MODELS.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+
+        <section className="parameter-card size-card">
+          <button
+            className="section-toggle"
+            onClick={() => setSizePresetOpen((open) => !open)}
+            type="button"
+            aria-expanded={sizePresetOpen}
+          >
+            <span>
+              <SlidersHorizontal aria-hidden="true" />
+              尺寸
+            </span>
+            <span className="section-meta">{request.width}×{request.height}</span>
+            <ChevronDown className={sizePresetOpen ? "open" : ""} aria-hidden="true" />
+          </button>
+
+          {sizePresetOpen ? (
+            <>
+              <div className="field-grid four">
+                <NumberField label="宽度" value={request.width} min={64} max={2048} onChange={(value) => update("width", value)} />
+                <NumberField label="高度" value={request.height} min={64} max={2048} onChange={(value) => update("height", value)} />
+              </div>
+              <div className="preset-row">
+                {SIZE_PRESETS.map((preset) => (
+                  <button
+                    className={request.width === preset.width && request.height === preset.height ? "chip active" : "chip"}
+                    key={preset.label}
+                    onClick={() => {
+                      update("width", preset.width);
+                      update("height", preset.height);
+                    }}
+                    type="button"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              <label className="range-field">
+                <span>STEPS</span>
+                <div className="range-control">
+                  <input
+                    aria-label="Steps"
+                    type="range"
+                    value={request.steps}
+                    min={1}
+                    max={60}
+                    onChange={(event) => update("steps", Number(event.target.value))}
+                  />
+                  <output>{request.steps}</output>
+                </div>
+              </label>
+              <label className="range-field">
+                <span>CFG SCALE</span>
+                <div className="range-control">
+                  <input
+                    aria-label="CFG Scale"
+                    type="range"
+                    value={request.scale}
+                    min={1}
+                    max={20}
+                    step={0.5}
+                    onChange={(event) => update("scale", Number(event.target.value))}
+                  />
+                  <output>{request.scale}</output>
+                </div>
+              </label>
+              <label className="field compact">
+                <span>种子</span>
+                <div className="seed-control">
+                  <input
+                    type="number"
+                    value={request.seed ?? ""}
+                    min={0}
+                    max={4294967295}
+                    onChange={(event) => {
+                      const v = event.target.value.trim();
+                      update("seed", v === "" ? undefined : Number(v));
+                    }}
+                  />
+                  <button
+                    className="icon-button"
+                    onClick={() => update("seed", Math.floor(Math.random() * 4294967296))}
+                    aria-label="随机种子"
+                    title="随机种子"
+                    type="button"
+                  >
+                    <RefreshCw aria-hidden="true" />
+                  </button>
+                  {request.seed !== undefined ? (
+                    <button
+                      className="icon-button"
+                      onClick={() => update("seed", undefined)}
+                      aria-label="清除种子"
+                      title="清除种子"
+                      type="button"
+                    >
+                      <Eraser aria-hidden="true" />
+                    </button>
+                  ) : null}
+                </div>
+              </label>
+            </>
+          ) : null}
+        </section>
+
+        <section className="template-panel" aria-label="Prompt templates">
+          <div className="template-head">
+            <span>
+              <Sparkles aria-hidden="true" />
+              模板
+            </span>
+            <span>1 / 2</span>
+          </div>
+          <div className="template-chips">
+            {QUICK_TEMPLATES.map((template) => (
+              <button
+                className="template-chip"
+                key={template}
+                onClick={() => update("prompt", [request.prompt.trim(), template].filter(Boolean).join(", "))}
+                type="button"
+              >
+                {template}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {request.action !== "generate" ? (
+          <section className="parameter-card mode-input-card">
+            <div className="section-head">
+              <ImagePlus aria-hidden="true" />
+              <h2>输入模式</h2>
+            </div>
+            <p className="mode-hint">
+              {request.action === "infill" ? "选择输入图并绘制遮罩。" : "选择一张输入图开始图生图。"}
+            </p>
+            <div className="tool-stack">
+              <div className={request.action === "infill" ? "asset-picker-row" : undefined}>
+                <AssetPicker
+                  asset={request.sourceImage}
+                  label="输入图"
+                  onClear={() => update("sourceImage", undefined)}
+                  onPick={() => sourceImageInputRef.current?.click()}
+                />
+                {request.action === "infill" ? (
+                  <AssetPicker
+                    asset={request.maskImage}
+                    label="遮罩图"
+                    onClear={() => update("maskImage", undefined)}
+                    onPick={() => {
+                      if (!request.sourceImage) {
+                        showNotice("info", "请先选择输入图。");
+                        return;
+                      }
+                      setMaskEditorOpen(true);
+                    }}
+                    pickLabel={request.maskImage ? "编辑" : "涂抹"}
+                  />
+                ) : null}
+              </div>
+              <div className="field-grid">
+                <NumberField label="强度" value={request.strength} min={0} max={1} step={0.01} onChange={(value) => update("strength", clamp01(value))} />
+                <NumberField label="噪声" value={request.noise} min={0} max={1} step={0.01} onChange={(value) => update("noise", clamp01(value))} />
+              </div>
+              <div className="field-grid">
+                <OptionalNumberField label="额外噪声种子" value={request.extraNoiseSeed} min={0} max={4294967295} onChange={(value) => update("extraNoiseSeed", value)} />
+                <Toggle label="颜色校正" checked={request.colorCorrect} onChange={(value) => update("colorCorrect", value)} />
+              </div>
+            </div>
+          </section>
+        ) : null}
+
         {stylePromptOpen ? (
           <section className="prompt-card compact">
-            <button className="section-toggle" onClick={() => setStylePromptOpen(false)} type="button">
+            <button className="section-toggle" onClick={() => setStylePromptOpen(false)} type="button" aria-expanded={stylePromptOpen}>
               <span>
                 <WandSparkles aria-hidden="true" />
                 画风提示词
@@ -1399,7 +1631,7 @@ function App() {
             />
           </section>
         ) : (
-          <button className="section-toggle" onClick={() => setStylePromptOpen(true)} type="button" style={{ padding: "8px 14px" }}>
+          <button className="section-toggle" onClick={() => setStylePromptOpen(true)} type="button" style={{ padding: "8px 14px" }} aria-expanded={stylePromptOpen}>
             <span>
               <WandSparkles aria-hidden="true" />
               画风提示词
@@ -1456,6 +1688,27 @@ function App() {
             rows={4}
           />
         </section>
+        </div>
+
+        <div className="prompt-submit">
+          <button className="run-button wide-button" onClick={generate} disabled={!canGenerate} type="button">
+            {isGenerating ? <Loader2 className="spin" aria-hidden="true" /> : <Sparkles aria-hidden="true" />}
+            {isGenerating ? "生成中" : "生成"}
+          </button>
+          <div className="prompt-submit-meta">
+            <span>{request.width}×{request.height} · {request.steps} 步</span>
+            <span>⌘⏎ 生成</span>
+          </div>
+          {notice ? (
+            <div
+              className={`notice prompt-notice ${notice.type}`}
+              role={notice.type === "error" ? "alert" : "status"}
+              aria-live="polite"
+            >
+              {notice.message}
+            </div>
+          ) : null}
+        </div>
 
       </aside>
 
@@ -1478,9 +1731,18 @@ function App() {
               <RotateCcw aria-hidden="true" />
               重置
             </button>
-            <button className="run-button" onClick={generate} disabled={!canGenerate} type="button">
-              {isGenerating ? <Loader2 className="spin" aria-hidden="true" /> : <Sparkles aria-hidden="true" />}
-              生成
+            <button
+              className="ghost-button"
+              onClick={() => {
+                setAdvancedOpen(true);
+                setParameterDrawerOpen(true);
+              }}
+              type="button"
+              aria-expanded={parameterDrawerOpen}
+              aria-controls="generation-parameters"
+            >
+              <Settings2 aria-hidden="true" />
+              高级
             </button>
           </div>
         </header>
@@ -1504,6 +1766,7 @@ function App() {
                       }
                       setMaskEditorOpen(true);
                     }}
+                    aria-label="局部重绘当前图片"
                     title="局部重绘当前图片"
                     type="button"
                   >
@@ -1512,15 +1775,16 @@ function App() {
                   <button
                     className={isImageFavorited(currentImage) ? "icon-button favorite active" : "icon-button favorite"}
                     onClick={() => toggleFavorite(currentImage)}
+                    aria-label={isImageFavorited(currentImage) ? "取消收藏" : "收藏图片"}
                     title={isImageFavorited(currentImage) ? "取消收藏" : "收藏图片"}
                     type="button"
                   >
                     <Heart aria-hidden="true" />
                   </button>
-                  <button className="icon-button" onClick={() => copyImage(currentImage)} title="复制图片" type="button">
+                  <button className="icon-button" onClick={() => copyImage(currentImage)} aria-label="复制图片" title="复制图片" type="button">
                     <Copy aria-hidden="true" />
                   </button>
-                  <button className="icon-button filled" onClick={() => saveImage(currentImage)} title="保存图片" type="button">
+                  <button className="icon-button filled" onClick={() => saveImage(currentImage)} aria-label="保存图片" title="保存图片" type="button">
                     <Download aria-hidden="true" />
                   </button>
                 </>
@@ -1537,16 +1801,16 @@ function App() {
               />
             ) : (
               <div className="empty-state">
-                <ImagePlus aria-hidden="true" />
-                <strong>等待生成结果</strong>
-                <span>输入提示词并点击生成。</span>
+                <Sparkles aria-hidden="true" />
+                <strong>还没有生成</strong>
+                <span>填写提示词后提交 ⌘↵</span>
               </div>
             )}
           </div>
         </section>
 
         <section className={historyOpen ? "history-card stage-history-card open" : "history-card stage-history-card"}>
-          <button className="section-toggle" onClick={() => setHistoryOpen((open) => !open)} type="button">
+          <button className="section-toggle" onClick={() => setHistoryOpen((open) => !open)} type="button" aria-expanded={historyOpen}>
             <span>
               <History aria-hidden="true" />
               历史记录
@@ -1585,6 +1849,7 @@ function App() {
                             event.stopPropagation();
                             removeHistoryItem(item.id, imageIndex);
                           }}
+                          aria-label="删除此记录"
                           title="删除此记录"
                           type="button"
                         >
@@ -1605,7 +1870,24 @@ function App() {
 
       </section>
 
-      <aside className="parameter-rail" aria-label="Generation parameters">
+      {parameterDrawerOpen ? (
+        <>
+          <button
+            className="drawer-backdrop"
+            onClick={() => setParameterDrawerOpen(false)}
+            type="button"
+            aria-label="关闭参数抽屉"
+          />
+          <aside id="generation-parameters" className="parameter-rail parameter-drawer" aria-label="生成参数">
+            <div className="drawer-head">
+              <div>
+                <p className="eyebrow">Workbench</p>
+                <h2>高级参数</h2>
+              </div>
+              <button className="icon-button" onClick={() => setParameterDrawerOpen(false)} type="button" aria-label="关闭参数抽屉">
+                <X aria-hidden="true" />
+              </button>
+            </div>
         <section className="account-card">
           <div className="section-head">
             <ShieldCheck aria-hidden="true" />
@@ -1616,71 +1898,6 @@ function App() {
             <span>点数：{formatOptionalPoints(account?.points)}</span>
             <span>本次：{lastCost === null ? "未计算" : formatPoints(lastCost)}</span>
           </div>
-        </section>
-
-        <section className="parameter-card">
-          <div className="section-head">
-            <Images aria-hidden="true" />
-            <h2>模型</h2>
-          </div>
-
-          <label className="field">
-            <span>图像模型</span>
-            <select value={request.model} onChange={(event) => update("model", event.target.value)}>
-              {MODELS.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </label>
-          {/* <div className="model-note">
-            <ShieldCheck aria-hidden="true" />
-            默认使用 NAI 4.5 full；局部重绘会自动切到对应 inpainting 模型。
-          </div> */}
-        </section>
-
-        <section className="parameter-card">
-          <div className="section-head">
-            <ImagePlus aria-hidden="true" />
-            <h2>输入模式</h2>
-          </div>
-          <p className="mode-hint">生成模式在工作台顶部切换，下方显示对应输入设置。</p>
-          {request.action !== "generate" ? (
-            <div className="tool-stack">
-              <div className={request.action === "infill" ? "asset-picker-row" : undefined}>
-                <AssetPicker
-                  asset={request.sourceImage}
-                  label="输入图"
-                  onClear={() => update("sourceImage", undefined)}
-                  onPick={() => sourceImageInputRef.current?.click()}
-                />
-                {request.action === "infill" ? (
-                <AssetPicker
-                  asset={request.maskImage}
-                  label="遮罩图"
-                  onClear={() => update("maskImage", undefined)}
-                  onPick={() => {
-                    if (!request.sourceImage) {
-                      showNotice("info", "请先选择输入图。");
-                      return;
-                    }
-                    setMaskEditorOpen(true);
-                  }}
-                  pickLabel={request.maskImage ? "编辑" : "涂抹"}
-                />
-                ) : null}
-              </div>
-              <div className="field-grid">
-                <NumberField label="强度" value={request.strength} min={0} max={1} step={0.01} onChange={(value) => update("strength", clamp01(value))} />
-                <NumberField label="噪声" value={request.noise} min={0} max={1} step={0.01} onChange={(value) => update("noise", clamp01(value))} />
-              </div>
-              <div className="field-grid">
-                <OptionalNumberField label="额外噪声种子" value={request.extraNoiseSeed} min={0} max={4294967295} onChange={(value) => update("extraNoiseSeed", value)} />
-                <Toggle label="颜色校正" checked={request.colorCorrect} onChange={(value) => update("colorCorrect", value)} />
-              </div>
-            </div>
-          ) : null}
         </section>
 
         {false ? (
@@ -1791,7 +2008,7 @@ function App() {
         ) : null}
 
         <section className="parameter-card character-card">
-          <button className="section-toggle" onClick={() => setCharacterOpen((open) => !open)} type="button">
+          <button className="section-toggle" onClick={() => setCharacterOpen((open) => !open)} type="button" aria-expanded={characterOpen}>
             <span>
               <Users aria-hidden="true" />
               Characters
@@ -1924,94 +2141,17 @@ function App() {
         </section>
 
         <section className="parameter-card">
-          <button className="section-toggle" onClick={() => setSizePresetOpen((open) => !open)} type="button">
-            <span>
-              <SlidersHorizontal aria-hidden="true" />
-              图像尺寸
-            </span>
-            <span className="section-meta">{request.width}×{request.height}</span>
-            <ChevronDown className={sizePresetOpen ? "open" : ""} aria-hidden="true" />
-          </button>
-
-          {sizePresetOpen ? (
-            <>
-              <div className="preset-row">
-                {SIZE_PRESETS.map((preset) => (
-                  <button
-                    className={request.width === preset.width && request.height === preset.height ? "chip active" : "chip"}
-                    key={preset.label}
-                    onClick={() => {
-                      update("width", preset.width);
-                      update("height", preset.height);
-                    }}
-                    type="button"
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="field-grid four">
-                <NumberField label="宽度" value={request.width} min={64} max={2048} onChange={(value) => update("width", value)} />
-                <NumberField label="高度" value={request.height} min={64} max={2048} onChange={(value) => update("height", value)} />
-                <NumberField label="采样数" value={request.nSamples} min={1} max={8} onChange={(value) => update("nSamples", value)} />
-              </div>
-              <label className="field compact">
-                <span>种子</span>
-                <div className="seed-control">
-                  <input
-                    type="number"
-                    value={request.seed ?? ""}
-                    min={0}
-                    max={4294967295}
-                    onChange={(event) => {
-                      const v = event.target.value.trim();
-                      update("seed", v === "" ? undefined : Number(v));
-                    }}
-                  />
-                  <button
-                    className="icon-button"
-                    onClick={() => update("seed", Math.floor(Math.random() * 4294967296))}
-                    title="随机种子"
-                    type="button"
-                  >
-                    <RefreshCw aria-hidden="true" />
-                  </button>
-                  {request.seed !== undefined ? (
-                    <button
-                      className="icon-button"
-                      onClick={() => update("seed", undefined)}
-                      title="清除种子"
-                      type="button"
-                    >
-                      <Eraser aria-hidden="true" />
-                    </button>
-                  ) : null}
-                </div>
-              </label>
-            </>
-          ) : null}
-        </section>
-
-        <section className="parameter-card">
-          <button className="section-toggle" onClick={() => setAdvancedOpen((open) => !open)} type="button">
+          <button className="section-toggle" onClick={() => setAdvancedOpen((open) => !open)} type="button" aria-expanded={advancedOpen}>
             <span>
               <Settings2 aria-hidden="true" />
-              采样参数
+              高级选项
             </span>
             <ChevronDown className={advancedOpen ? "open" : ""} aria-hidden="true" />
           </button>
 
           {advancedOpen ? (
             <div className="advanced-stack">
-              <div className="field-grid four">
-                <NumberField label="步数" value={request.steps} min={1} max={60} onChange={(value) => update("steps", value)} />
-                <NumberField label="Scale" value={request.scale} min={1} max={20} step={0.5} onChange={(value) => update("scale", value)} />
-                <NumberField label="CFG 重缩放" value={request.cfgRescale} min={0} max={1} step={0.01} onChange={(value) => update("cfgRescale", value)} />
-                <OptionalNumberField label="Skip Sigma" value={request.skipCfgAboveSigma} min={0} max={100} step={0.1} onChange={(value) => update("skipCfgAboveSigma", value)} />
-              </div>
-
-              <div className="field-grid">
+              <div className="advanced-fields">
                 <label className="field">
                   <span>采样器</span>
                   <select value={request.sampler} onChange={(event) => update("sampler", event.target.value)}>
@@ -2032,6 +2172,18 @@ function App() {
                     ))}
                   </select>
                 </label>
+                <label className="field">
+                  <span>反向预设（UCPRESET）</span>
+                  <select value={request.ucPreset} onChange={(event) => update("ucPreset", Number(event.target.value))}>
+                    <option value={0}>0 · None</option>
+                    <option value={1}>1 · Light</option>
+                    <option value={2}>2 · Heavy</option>
+                    <option value={3}>3 · Human Focus</option>
+                  </select>
+                </label>
+                <NumberField label="CFG 重缩放" value={request.cfgRescale} min={0} max={1} step={0.01} onChange={(value) => update("cfgRescale", value)} />
+                <NumberField label="采样数" value={request.nSamples} min={1} max={8} onChange={(value) => update("nSamples", value)} />
+                <OptionalNumberField label="Skip Sigma" value={request.skipCfgAboveSigma} min={0} max={100} step={0.1} onChange={(value) => update("skipCfgAboveSigma", value)} />
               </div>
 
               <div className="toggle-grid">
@@ -2055,7 +2207,9 @@ function App() {
             <pre>{JSON.stringify(buildPayloadPreview(request), null, 2)}</pre>
           </section>
         ) : null}
-      </aside>
+          </aside>
+        </>
+      ) : null}
         </div>
         </div>
       ) : activePanel === "promptLibrary" ? (
