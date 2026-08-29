@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   Eraser,
+  Frame,
   Heart,
   History,
   Images,
@@ -32,6 +33,19 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, PointerEvent } from "react";
 import appIcon from "../icon.png";
+import { PresetsPage } from "./PresetsPage";
+import {
+  fromSharedPresets,
+  loadPresetStore,
+  mergePresetStores,
+  savePresetStore,
+  SHARED_PRESETS_MIGRATED_KEY,
+  snapshotPresetParams,
+  toSharedPresets,
+  type PresetStore,
+  type SavedPreset,
+  type SharedPreset,
+} from "./presets";
 
 type ImageAction = "generate" | "img2img" | "infill";
 type ImageFormat = "png" | "webp";
@@ -55,6 +69,7 @@ type ImageRequest = {
   noiseSchedule: string;
   imageFormat: ImageFormat;
   qualityToggle: boolean;
+  transparentBackground: boolean;
   ucPreset: number;
   paramsVersion: number;
   dynamicThresholding: boolean;
@@ -131,15 +146,18 @@ type Notice = {
   message: string;
 };
 
+const TOKEN_NOT_CONFIGURED_ERROR = "API Token is not configured";
+const TOKEN_NOT_CONFIGURED_MESSAGE = "API Token 未配置，请在设置中重新保存。";
+
 type TranslationDirection = "zh-to-en-tags" | "en-to-zh";
 
 type AppSettings = {
   showPayloadPreview: boolean;
   enableAppLogs: boolean;
   allowInvalidTls: boolean;
+  useNovelAiProxy: boolean;
   novelAiProxyUrl: string;
   historyDisplayLimit: number;
-  knowledgeServerUrl: string;
   translationBaseUrl: string;
   translationApiKey: string;
   translationModel: string;
@@ -185,70 +203,26 @@ type ImportedImageMetadata = {
   nSamples?: number;
 };
 
-type PromptEntryType = "style" | "scene" | "clothing";
-
-type PromptLibraryEntry = {
-  id: number;
-  slug: string;
-  entry_type: PromptEntryType;
-  title: string;
-  summary: string;
-  prompt: string;
-  negative_prompt?: string;
-  tags?: string[];
-  category?: {
-    slug: string;
-    name: string;
-  } | null;
-  source?: {
-    slug: string;
-    title: string;
-  } | null;
-  examples?: Array<{
-    id: number;
-    label: string;
-    kind: string;
-    url: string;
-    metadata?: Record<string, unknown>;
-  }>;
-};
-
-type PromptLibraryCacheRecord = {
-  type: PromptEntryType;
-  entries: PromptLibraryEntry[];
-  updatedAt: string;
-  serverUrl: string;
-};
-
 const HISTORY_KEY = "novelai-gui-history";
 const SETTINGS_KEY = "novelai-gui-settings";
 const HISTORY_DB_NAME = "novelai-gui";
 const HISTORY_DB_VERSION = 4;
 const HISTORY_STORE_NAME = "history";
-const PROMPT_LIBRARY_STORE_NAME = "prompt-library";
 const FAVORITES_STORE_NAME = "favorites";
 const MAX_HISTORY_ITEMS = 40;
+const LEGACY_DEFAULT_NOVELAI_PROXY_URL = "http://127.0.0.1:7897";
 
 const DEFAULT_SETTINGS: AppSettings = {
   showPayloadPreview: false,
   enableAppLogs: false,
   allowInvalidTls: false,
-  novelAiProxyUrl: "http://127.0.0.1:7897",
+  useNovelAiProxy: false,
+  novelAiProxyUrl: "",
   historyDisplayLimit: 8,
-  knowledgeServerUrl: "https://prompt.apishelter.top",
   translationBaseUrl: "",
   translationApiKey: "",
   translationModel: "",
 };
-
-const PROMPT_ENTRY_TYPES: Array<{ type: PromptEntryType; label: string }> = [
-  { type: "style", label: "画风" },
-  { type: "scene", label: "场景" },
-  { type: "clothing", label: "服装" },
-];
-
-const PROMPT_LIBRARY_MAX_RESULTS = 5000;
-const PROMPT_LIBRARY_PAGE_SIZE = 80;
 
 const DEFAULT_REQUEST: ImageRequest = {
   stylePrompt: "",
@@ -268,6 +242,7 @@ const DEFAULT_REQUEST: ImageRequest = {
   noiseSchedule: "karras",
   imageFormat: "png",
   qualityToggle: true,
+  transparentBackground: false,
   ucPreset: 0,
   paramsVersion: 3,
   dynamicThresholding: false,
@@ -287,6 +262,8 @@ const DEFAULT_REQUEST: ImageRequest = {
 };
 
 const MODELS = [
+  "nai-diffusion-5-full",
+  "nai-diffusion-5-curated",
   "nai-diffusion-4-5-full",
   "nai-diffusion-4-5-curated",
   "nai-diffusion-4-5-full-inpainting",
@@ -325,7 +302,7 @@ const SIZE_PRESETS = [
   { label: "9:16", width: 832, height: 1216 },
 ];
 
-const QUICK_TEMPLATES = ["格子衫", "1999", "Youhua", "love", "米山舞", "loli2", "loli", "帅", "Yuege", "恋人不行", "色气04", "biya"];
+const UPSCALE_BLUR_SIGMAS = [0.3, 0.35, 0.4, 0.45, 0.5] as const;
 
 function App() {
   const [request, setRequest] = useState<ImageRequest>(DEFAULT_REQUEST);
@@ -344,26 +321,16 @@ function App() {
   const [stylePromptOpen, setStylePromptOpen] = useState(true);
   const [sizePresetOpen, setSizePresetOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
-  const [activePanel, setActivePanel] = useState<"generate" | "promptLibrary" | "settings" | "favorites">("generate");
+  const [activePanel, setActivePanel] = useState<"generate" | "presets" | "settings" | "favorites">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
+  const [presetStore, setPresetStore] = useState<PresetStore>(() => loadPresetStore());
+  const [presetSyncReady, setPresetSyncReady] = useState(() => !isTauriRuntime());
+  const [presetSyncAvailable, setPresetSyncAvailable] = useState(() => !isTauriRuntime());
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [isRefreshingAccount, setIsRefreshingAccount] = useState(false);
   const [lastCost, setLastCost] = useState<number | null>(null);
   const [historyReady, setHistoryReady] = useState(false);
   const [favoritesReady, setFavoritesReady] = useState(false);
-  const [promptLibraryType, setPromptLibraryType] = useState<PromptEntryType>("style");
-  const [promptLibraryQuery, setPromptLibraryQuery] = useState("");
-  const [promptLibraryResults, setPromptLibraryResults] = useState<PromptLibraryEntry[]>([]);
-  const [promptLibraryVisibleCount, setPromptLibraryVisibleCount] = useState(PROMPT_LIBRARY_PAGE_SIZE);
-  const [isSearchingPromptLibrary, setIsSearchingPromptLibrary] = useState(false);
-  const [promptLibraryStatus, setPromptLibraryStatus] = useState<string | null>(null);
-  const [selectedPromptEntries, setSelectedPromptEntries] = useState<
-    Partial<Record<PromptEntryType, PromptLibraryEntry>>
-  >({});
-  const [selectedPromptBoxes, setSelectedPromptBoxes] = useState<Record<Exclude<PromptEntryType, "style">, PromptLibraryEntry[]>>({
-    scene: [],
-    clothing: [],
-  });
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const sourceImageInputRef = useRef<HTMLInputElement | null>(null);
   const maskImageInputRef = useRef<HTMLInputElement | null>(null);
@@ -375,7 +342,7 @@ function App() {
   const [isSuggestingTags, setIsSuggestingTags] = useState(false);
   const [isEncodingVibe, setIsEncodingVibe] = useState(false);
   const [isToolRunning, setIsToolRunning] = useState(false);
-  const [upscaleScale, setUpscaleScale] = useState<2 | 4>(2);
+  const [upscaleBlurSigma, setUpscaleBlurSigma] = useState<number | undefined>(undefined);
   const [directorToolType, setDirectorToolType] = useState<DirectorToolType>("lineart");
   const [maskEditorOpen, setMaskEditorOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -390,6 +357,9 @@ function App() {
     invoke<boolean>("has_api_token")
       .then((configured) => {
         setHasToken(configured);
+        if (!configured) {
+          setAccount(null);
+        }
         if (configured) {
           refreshAccountStatus(false);
         }
@@ -424,6 +394,79 @@ function App() {
   }, [settings]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    let cancelled = false;
+    void invoke<SharedPreset[] | null>("load_shared_presets")
+      .then((shared) => {
+        if (cancelled) {
+          return;
+        }
+        if (shared !== null) {
+          const imported = fromSharedPresets(shared);
+          const migrated = localStorage.getItem(SHARED_PRESETS_MIGRATED_KEY) === "1";
+          setPresetStore(migrated ? imported : mergePresetStores(presetStore, imported));
+        } else {
+          // Also clean a hot-reloaded session that still held the old
+          // built-in templates in React state.
+          setPresetStore(loadPresetStore());
+        }
+        localStorage.setItem(SHARED_PRESETS_MIGRATED_KEY, "1");
+        setPresetSyncAvailable(true);
+        setPresetSyncReady(true);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        console.error("共享预设读取失败", error);
+        setPresetSyncReady(true);
+        showNotice("error", "共享预设读取失败，本次只保留本地预设。");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!presetSyncReady) {
+      return;
+    }
+
+    savePresetStore(presetStore);
+    if (!isTauriRuntime() || !presetSyncAvailable) {
+      return;
+    }
+
+    void invoke("save_shared_presets", { presets: toSharedPresets(presetStore) }).catch((error) => {
+      console.error("共享预设写入失败", error);
+      showNotice("error", "共享预设写入失败，请稍后重试。");
+    });
+  }, [presetStore, presetSyncAvailable, presetSyncReady]);
+
+  useEffect(() => {
+    if (!presetSyncAvailable || !isTauriRuntime()) {
+      return;
+    }
+
+    const refreshSharedPresets = () => {
+      void invoke<SharedPreset[] | null>("load_shared_presets")
+        .then((shared) => {
+          if (shared !== null) {
+            setPresetStore(fromSharedPresets(shared));
+          }
+        })
+        .catch((error) => console.error("共享预设刷新失败", error));
+    };
+
+    window.addEventListener("focus", refreshSharedPresets);
+    return () => window.removeEventListener("focus", refreshSharedPresets);
+  }, [presetSyncAvailable]);
+
+  useEffect(() => {
     let cancelled = false;
 
     void (async () => {
@@ -456,14 +499,6 @@ function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (activePanel !== "promptLibrary") {
-      return;
-    }
-
-    void searchPromptLibrary({ type: promptLibraryType, query: "" });
-  }, [activePanel, promptLibraryType]);
 
   useEffect(() => {
     if (!parameterDrawerOpen) {
@@ -509,9 +544,21 @@ function App() {
       await invoke("save_api_token", { token });
       setToken("");
       setHasToken(true);
-      showNotice("success", "Token 已保存到系统凭据。");
+      setAccount(null);
       writeAppLog("success", "token", "API Token 已保存到系统凭据。");
-      refreshAccountStatus(false);
+      const verification = await refreshAccountStatus(false);
+      showNotice(
+        verification.summary
+          ? "success"
+          : verification.tokenMissing
+            ? "error"
+            : "info",
+        verification.summary
+          ? "Token 已保存并验证成功。"
+          : verification.tokenMissing
+            ? TOKEN_NOT_CONFIGURED_MESSAGE
+            : "Token 已保存，但账号状态暂时无法验证。",
+      );
     } catch (error) {
       const message = String(error);
       showNotice("error", message);
@@ -524,28 +571,35 @@ function App() {
       if (showResult) {
         showNotice("info", "请在 Tauri 桌面窗口中刷新账号状态。");
       }
-      return null;
+      return { summary: null, tokenMissing: false };
     }
 
     setIsRefreshingAccount(true);
     try {
       const raw = await invoke<unknown>("get_account_status", {
         allowInvalidTls: settings.allowInvalidTls,
-        proxyUrl: settings.novelAiProxyUrl,
+        proxyUrl: activeNovelAiProxyUrl(settings),
       });
       const summary = summarizeAccount(raw);
       setAccount(summary);
+      setHasToken(true);
       writeAppLog("success", "account", describeAccountStatus(summary));
       if (showResult) {
         showNotice("success", "账号状态已刷新。");
       }
-      return summary;
+      return { summary, tokenMissing: false };
     } catch (error) {
+      const tokenMissing = isTokenNotConfiguredError(error);
+      const message = tokenMissing ? TOKEN_NOT_CONFIGURED_MESSAGE : String(error);
+      setAccount(null);
+      if (tokenMissing) {
+        setHasToken(false);
+      }
       writeAppLog("error", "account", String(error));
       if (showResult) {
-        showNotice("error", String(error));
+        showNotice("error", message);
       }
-      return null;
+      return { summary: null, tokenMissing };
     } finally {
       setIsRefreshingAccount(false);
     }
@@ -565,7 +619,13 @@ function App() {
     setIsGenerating(true);
     setNotice(null);
     writeAppLog("info", "generate", `开始生成：${effectiveImageModel(request)} · ${request.width}×${request.height} · ${request.action}`);
-    const beforeAccount = await refreshAccountStatus(false);
+    const beforeAccountResult = await refreshAccountStatus(false);
+    if (beforeAccountResult.tokenMissing) {
+      setIsGenerating(false);
+      showNotice("error", TOKEN_NOT_CONFIGURED_MESSAGE);
+      return;
+    }
+    const beforeAccount = beforeAccountResult.summary;
     try {
       const response = await invoke<GenerateImageResponse>("generate_image", { request: buildBackendImageRequest(request, settings) });
       setActiveImages(response.images);
@@ -586,8 +646,8 @@ function App() {
         "generate",
         `生成完成：${response.images.length} 张图，响应类型 ${response.contentType}。`,
       );
-      const afterAccount = await refreshAccountStatus(false);
-      const cost = calculateAccountCost(beforeAccount, afterAccount);
+      const afterAccountResult = await refreshAccountStatus(false);
+      const cost = calculateAccountCost(beforeAccount, afterAccountResult.summary);
       setLastCost(cost);
       showNotice(
         "success",
@@ -602,9 +662,15 @@ function App() {
         "generate",
         message,
       );
+      if (isTokenNotConfiguredError(error)) {
+        setHasToken(false);
+        setAccount(null);
+      }
       showNotice(
         "error",
-        message.includes("Concurrent generation is locked")
+        isTokenNotConfiguredError(error)
+          ? TOKEN_NOT_CONFIGURED_MESSAGE
+          : message.includes("Concurrent generation is locked")
           ? "当前账号已有一个并发生图任务正在运行，请等待它完成后再试。"
           : message,
       );
@@ -732,7 +798,7 @@ function App() {
         prompt,
         lang: "en",
         allowInvalidTls: settings.allowInvalidTls,
-        proxyUrl: settings.novelAiProxyUrl,
+        proxyUrl: activeNovelAiProxyUrl(settings),
       });
       const tags = extractTagSuggestions(response);
       setTagSuggestions(tags);
@@ -766,7 +832,7 @@ function App() {
           model: request.model,
           informationExtracted: request.referenceInformationExtracted,
           allowInvalidTls: settings.allowInvalidTls,
-          proxyUrl: settings.novelAiProxyUrl,
+          proxyUrl: activeNovelAiProxyUrl(settings),
         },
       });
       update("referenceImage", encoded);
@@ -788,16 +854,21 @@ function App() {
       return;
     }
 
+    const upscaleModel = getUpscaleModel(request.model);
+    if (!upscaleModel) {
+      showNotice("info", "当前模型不能用于最新 Upscale，请先选择一个具体的 NovelAI 图像模型。");
+      return;
+    }
+
     setIsToolRunning(true);
     try {
       const response = await invoke<GenerateImageResponse>("upscale_image", {
         request: {
           image: currentImage.base64,
-          width: request.width,
-          height: request.height,
-          scale: upscaleScale,
+          model: upscaleModel,
+          declaredBlurSigma: upscaleBlurSigma,
           allowInvalidTls: settings.allowInvalidTls,
-          proxyUrl: settings.novelAiProxyUrl,
+          proxyUrl: activeNovelAiProxyUrl(settings),
         },
       });
       setActiveImages(response.images);
@@ -833,7 +904,7 @@ function App() {
           reqType: directorToolType,
           defry: 0,
           allowInvalidTls: settings.allowInvalidTls,
-          proxyUrl: settings.novelAiProxyUrl,
+          proxyUrl: activeNovelAiProxyUrl(settings),
         },
       });
       setActiveImages(response.images);
@@ -860,146 +931,19 @@ function App() {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
-  async function searchPromptLibrary(options?: { type?: PromptEntryType; query?: string; forceRefresh?: boolean }) {
-    const baseUrl = normalizeServerUrl(DEFAULT_SETTINGS.knowledgeServerUrl);
-    if (!baseUrl) {
-      setPromptLibraryStatus("素材库服务地址不可用。");
-      return;
-    }
-
-    const entryType = options?.type ?? promptLibraryType;
-    const query = options?.query ?? promptLibraryQuery;
-    const forceRefresh = options?.forceRefresh ?? false;
-
-    setIsSearchingPromptLibrary(true);
-    setPromptLibraryStatus(null);
-    try {
-      if (!forceRefresh) {
-        const cached = await loadPromptLibraryCache(entryType);
-        if (cached) {
-          const results = sortPromptLibraryResults(filterPromptLibraryEntries(cached.entries, query), entryType);
-          setPromptLibraryResults(results);
-          setPromptLibraryVisibleCount(PROMPT_LIBRARY_PAGE_SIZE);
-          setPromptLibraryStatus(
-            query.trim()
-              ? `本地缓存匹配 ${results.length} 条。`
-              : `已从本地缓存载入 ${results.length} 条。`,
-          );
-          return;
-        }
-      }
-
-      const entries = await fetchPromptLibraryEntries(entryType);
-      await savePromptLibraryCache({
-        type: entryType,
-        entries,
-        updatedAt: new Date().toISOString(),
-        serverUrl: baseUrl,
-      });
-      const results = sortPromptLibraryResults(filterPromptLibraryEntries(entries, query), entryType);
-      setPromptLibraryResults(results);
-      setPromptLibraryVisibleCount(PROMPT_LIBRARY_PAGE_SIZE);
-      setPromptLibraryStatus(
-        forceRefresh
-          ? `已刷新并保存 ${entries.length} 条，当前显示 ${results.length} 条。`
-          : results.length > 0 ? `已载入并保存 ${entries.length} 条，当前显示 ${results.length} 条。` : "没有匹配结果。",
-      );
-    } catch (error) {
-      const cached = await loadPromptLibraryCache(entryType);
-      if (cached) {
-        const results = sortPromptLibraryResults(filterPromptLibraryEntries(cached.entries, query), entryType);
-        setPromptLibraryResults(results);
-        setPromptLibraryVisibleCount(PROMPT_LIBRARY_PAGE_SIZE);
-        setPromptLibraryStatus(`服务器不可用，已使用本地缓存 ${results.length} 条。`);
-      } else {
-        setPromptLibraryResults([]);
-        setPromptLibraryStatus(String(error));
-      }
-    } finally {
-      setIsSearchingPromptLibrary(false);
-    }
+  function applyParameterPreset(preset: SavedPreset) {
+    setRequest((current) => normalizeImageRequest({ ...current, ...preset.payload } as ImageRequest));
+    setActivePanel("generate");
+    showNotice("success", `已应用预设“${preset.name}”。`);
   }
 
-  async function showRandomPromptEntries() {
-    const baseUrl = normalizeServerUrl(DEFAULT_SETTINGS.knowledgeServerUrl);
-    if (!baseUrl) {
-      setPromptLibraryStatus("素材库服务地址不可用。");
-      return;
-    }
-
-    setIsSearchingPromptLibrary(true);
-    setPromptLibraryStatus(null);
-    try {
-      const cached = await loadPromptLibraryCache(promptLibraryType);
-      const entries = cached?.entries ?? await fetchPromptLibraryEntries(promptLibraryType);
-      if (cached) {
-        await savePromptLibraryCache({ type: promptLibraryType, entries, updatedAt: new Date().toISOString(), serverUrl: baseUrl });
-      }
-      const shuffled = [...entries].sort(() => Math.random() - 0.5);
-      const count = Math.min(8, shuffled.length);
-      setPromptLibraryResults(shuffled.slice(0, count));
-      setPromptLibraryVisibleCount(count);
-      setPromptLibraryStatus(`随机推荐 ${count} 条，刷新可更换。`);
-    } catch (error) {
-      setPromptLibraryStatus(String(error));
-    } finally {
-      setIsSearchingPromptLibrary(false);
-    }
-  }
-
-  const visiblePromptLibraryResults = promptLibraryResults.slice(0, promptLibraryVisibleCount);
-
-  function togglePromptEntry(entry: PromptLibraryEntry) {
-    const prompt = entry.prompt.trim();
-    if (!prompt) {
-      setPromptLibraryStatus("这个条目没有可用 prompt。");
-      return;
-    }
-
-    if (entry.entry_type === "style") {
-      const currentSelection = selectedPromptEntries.style;
-      const isSameSelection = currentSelection?.slug === entry.slug;
-
-      setSelectedPromptEntries((current) => {
-        const next = { ...current };
-        if (isSameSelection) {
-          delete next.style;
-        } else {
-          next.style = entry;
-        }
-        return next;
-      });
-
-      setRequest((current) => ({
-        ...current,
-        stylePrompt: isSameSelection ? "" : prompt,
-      }));
-
-      setPromptLibraryStatus(isSameSelection ? `已取消画风：${entry.title}` : `已应用画风：${entry.title}`);
-      return;
-    }
-
-    const type = entry.entry_type;
-    setSelectedPromptBoxes((current) => {
-      const exists = current[type].some((item) => item.slug === entry.slug);
-      return {
-        ...current,
-        [type]: exists
-          ? current[type].filter((item) => item.slug !== entry.slug)
-          : [...current[type], entry],
-      };
-    });
-    setPromptLibraryStatus(`已更新${promptEntryTypeLabel(type)}选择。`);
-  }
-
-  function updateMainPromptFromSelection() {
-    const styleEntry = selectedPromptEntries.style;
-    setRequest((current) => ({
-      ...current,
-      stylePrompt: styleEntry?.prompt?.trim() ?? "",
-      prompt: buildPromptSelectionText(undefined, selectedPromptBoxes),
-    }));
-    setPromptLibraryStatus("已写入画风和主提示词。");
+  function applyPromptTemplate(preset: SavedPreset) {
+    const prompt = typeof preset.payload.prompt === "string" ? preset.payload.prompt : "";
+    const negativePrompt = typeof preset.payload.negativePrompt === "string" ? preset.payload.negativePrompt : "";
+    update("prompt", prompt);
+    update("negativePrompt", negativePrompt);
+    setActivePanel("generate");
+    showNotice("success", `已填入提示词模板“${preset.name}”。`);
   }
 
   function addCharacter() {
@@ -1315,11 +1259,21 @@ function App() {
       />
       <header className="app-titlebar">
         <div className="titlebar-spacer" />
-        <div className={hasToken ? "api-status-pill" : "api-status-pill missing"}>
+        <div
+          className={
+            hasToken
+              ? account
+                ? "api-status-pill"
+                : "api-status-pill pending"
+              : "api-status-pill missing"
+          }
+        >
           <span className="api-status-dot" />
           <span>
             {hasToken
-              ? `API 已连接${account?.tier ? ` · ${account.tier}` : ""}${account?.points !== undefined ? ` · ${formatPoints(account.points)} 点` : ""}`
+              ? account
+                ? `API 已连接${account.tier ? ` · ${account.tier}` : ""}${account.points !== undefined ? ` · ${formatPoints(account.points)} 点` : ""}`
+                : "API Token 已配置，待验证"
               : "未设置 API Token"}
           </span>
         </div>
@@ -1337,20 +1291,20 @@ function App() {
         <button
           className={activePanel === "generate" ? "nav-button active" : "nav-button"}
           onClick={() => setActivePanel("generate")}
-          title="图像生成"
+          title="工作台"
           type="button"
         >
           <Images aria-hidden="true" />
-          {!sidebarCollapsed ? <span className="nav-label">图像生成</span> : null}
+          {!sidebarCollapsed ? <span className="nav-label">工作台</span> : null}
         </button>
         <button
-          className={activePanel === "promptLibrary" ? "nav-button active" : "nav-button"}
-          onClick={() => setActivePanel("promptLibrary")}
-          title="Prompt 助手"
+          className={activePanel === "presets" ? "nav-button active" : "nav-button"}
+          onClick={() => setActivePanel("presets")}
+          title="预设"
           type="button"
         >
           <WandSparkles aria-hidden="true" />
-          {!sidebarCollapsed ? <span className="nav-label">Prompt 助手</span> : null}
+          {!sidebarCollapsed ? <span className="nav-label">预设</span> : null}
         </button>
         <button
           className={activePanel === "settings" ? "nav-button active" : "nav-button"}
@@ -1422,7 +1376,16 @@ function App() {
 
           <label className="field">
             <span>模型</span>
-            <select value={request.model} onChange={(event) => update("model", event.target.value)}>
+            <select
+              value={request.model}
+              onChange={(event) => {
+                const model = event.target.value;
+                update("model", model);
+                if (!isV5ImageModel(model)) {
+                  update("transparentBackground", false);
+                }
+              }}
+            >
               {MODELS.map((model) => (
                 <option key={model} value={model}>
                   {model}
@@ -1536,25 +1499,33 @@ function App() {
           ) : null}
         </section>
 
-        <section className="template-panel" aria-label="Prompt templates">
+        <section className="template-panel" aria-label="参数预设">
           <div className="template-head">
             <span>
-              <Sparkles aria-hidden="true" />
-              模板
+              <Frame aria-hidden="true" />
+              预设
             </span>
-            <span>1 / 2</span>
+            <button className="template-manage" onClick={() => setActivePanel("presets")} type="button">
+              管理
+            </button>
           </div>
           <div className="template-chips">
-            {QUICK_TEMPLATES.map((template) => (
+            {presetStore.params.slice(0, 12).map((preset) => (
               <button
                 className="template-chip"
-                key={template}
-                onClick={() => update("prompt", [request.prompt.trim(), template].filter(Boolean).join(", "))}
+                key={preset.id}
+                onClick={() => applyParameterPreset(preset)}
                 type="button"
               >
-                {template}
+                {preset.name}
               </button>
             ))}
+            {presetStore.params.length === 0 ? (
+              <div className="preset-inline-empty">
+                <span>暂无参数预设</span>
+                <button onClick={() => setActivePanel("presets")} type="button">去新建</button>
+              </div>
+            ) : null}
           </div>
         </section>
 
@@ -1663,6 +1634,17 @@ function App() {
             placeholder="masterpiece, best quality, 1girl..."
             rows={10}
           />
+          <div className="prompt-option-row">
+            <Toggle
+              label="透明背景"
+              checked={request.transparentBackground}
+              onChange={(value) => update("transparentBackground", value)}
+              disabled={!isV5ImageModel(request.model)}
+            />
+            <span className="prompt-option-hint">
+              {isV5ImageModel(request.model) ? "V5 专用" : "仅 V5 支持"}
+            </span>
+          </div>
         </section>
 
         <section className="prompt-card compact">
@@ -1900,7 +1882,6 @@ function App() {
           </div>
         </section>
 
-        {false ? (
         <section className="parameter-card">
           <button className="section-toggle" onClick={() => setApiToolsOpen((open) => !open)} type="button">
             <span>
@@ -1913,7 +1894,7 @@ function App() {
             <div className="tool-stack">
               <div className="tool-box">
                 <strong>Tag Suggestion</strong>
-                <div className="prompt-library-search compact-search">
+                <div className="tool-search compact-search">
                   <input
                     value={tagQuery}
                     onChange={(event) => setTagQuery(event.target.value)}
@@ -1962,15 +1943,26 @@ function App() {
 
               <div className="tool-box">
                 <strong>结果工具</strong>
-                <div className="preset-row two">
-                  {[2, 4].map((scale) => (
-                    <button className={upscaleScale === scale ? "chip active" : "chip"} key={scale} onClick={() => setUpscaleScale(scale as 2 | 4)} type="button">
-                      {scale}x
-                    </button>
-                  ))}
-                </div>
+                <span className="tool-helper">固定 4× 放大，不读取 Prompt 或其他生图设置。</span>
+                <label className="field">
+                  <span>模糊参考（可选）</span>
+                  <select
+                    value={upscaleBlurSigma ?? ""}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setUpscaleBlurSigma(value === "" ? undefined : Number(value));
+                    }}
+                  >
+                    <option value="">自动</option>
+                    {UPSCALE_BLUR_SIGMAS.map((sigma) => (
+                      <option key={sigma} value={sigma}>
+                        {sigma.toFixed(2)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <button className="ghost-button wide-button" onClick={() => void upscaleCurrentImage()} disabled={isToolRunning || !hasToken || !currentImage} type="button">
-                  <Maximize2 aria-hidden="true" />
+                  {isToolRunning ? <Loader2 className="spin" aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
                   超分当前图
                 </button>
               </div>
@@ -2005,7 +1997,6 @@ function App() {
             </div>
           ) : null}
         </section>
-        ) : null}
 
         <section className="parameter-card character-card">
           <button className="section-toggle" onClick={() => setCharacterOpen((open) => !open)} type="button" aria-expanded={characterOpen}>
@@ -2020,10 +2011,10 @@ function App() {
           </button>
 
           {characterOpen ? (
-            !isV4ImageModel(request.model) ? (
+            !isModernImageModel(request.model) ? (
               <div className="model-note">
                 <ShieldCheck aria-hidden="true" />
-                Character 仅对 NAI 4 / 4.5 模型生效。
+                Character 仅对 NAI 4 / 4.5 / 5 模型生效。
               </div>
             ) : (
               <>
@@ -2212,139 +2203,16 @@ function App() {
       ) : null}
         </div>
         </div>
-      ) : activePanel === "promptLibrary" ? (
-        <section className="prompt-library-page" aria-label="Prompt library">
-          <header className="settings-header">
-            <div>
-              <p className="eyebrow">Prompt Library</p>
-              <h2>Prompt 助手</h2>
-            </div>
-          </header>
-
-          <section className="settings-panel prompt-library-panel">
-            <div className="prompt-library-fixed-top">
-              <div className="section-head">
-                <WandSparkles aria-hidden="true" />
-                <h2>素材查询</h2>
-              </div>
-
-              <div className="prompt-library-tabs">
-                {PROMPT_ENTRY_TYPES.map((item) => (
-                  <button
-                    className={promptLibraryType === item.type ? "chip active" : "chip"}
-                    key={item.type}
-                    onClick={() => {
-                      setPromptLibraryType(item.type);
-                      setPromptLibraryResults([]);
-                      setPromptLibraryStatus(null);
-                      setPromptLibraryQuery("");
-                    }}
-                    type="button"
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="prompt-library-search">
-                <input
-                  value={promptLibraryQuery}
-                  onChange={(event) => setPromptLibraryQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      void searchPromptLibrary();
-                    }
-                  }}
-                  placeholder="搜索 wlop、坐姿、女仆..."
-                />
-                <button className="icon-button filled" onClick={() => void searchPromptLibrary()} disabled={isSearchingPromptLibrary} title="搜索" type="button">
-                  {isSearchingPromptLibrary ? <Loader2 className="spin" aria-hidden="true" /> : <Search aria-hidden="true" />}
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() => void showRandomPromptEntries()}
-                  disabled={isSearchingPromptLibrary}
-                  title="随机推荐"
-                  type="button"
-                >
-                  {isSearchingPromptLibrary ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() => void searchPromptLibrary({ forceRefresh: true })}
-                  disabled={isSearchingPromptLibrary}
-                  title="刷新并保存素材库"
-                  type="button"
-                >
-                  <RefreshCw className={isSearchingPromptLibrary ? "spin" : ""} aria-hidden="true" />
-                </button>
-              </div>
-
-              {promptLibraryStatus ? <div className="prompt-library-status">{promptLibraryStatus}</div> : null}
-
-              <div className="prompt-library-selection">
-                <span>画风：{selectedPromptEntries.style?.title ?? "未选择"}</span>
-                <span>场景：{selectedPromptBoxes.scene.length > 0 ? String(selectedPromptBoxes.scene.length) + " 项" : "未选择"}</span>
-                <span>服装：{selectedPromptBoxes.clothing.length > 0 ? String(selectedPromptBoxes.clothing.length) + " 项" : "未选择"}</span>
-              </div>
-            </div>
-
-            <div className="prompt-library-results-scroll">
-              <div className="prompt-library-results">
-                {visiblePromptLibraryResults.map((entry) => (
-                  <button
-                    className={isPromptEntrySelected(entry, selectedPromptEntries, selectedPromptBoxes) ? "prompt-library-item active" : "prompt-library-item"}
-                    key={entry.slug}
-                    onClick={() => togglePromptEntry(entry)}
-                    type="button"
-                  >
-                    <strong>{entry.title}</strong>
-                    <span>{entry.category?.name ?? promptEntryTypeLabel(entry.entry_type)} · {entry.source?.title ?? "本地素材库"}</span>
-                    <PromptEntryImages entry={entry} />
-                    <em>{entry.prompt}</em>
-                  </button>
-                ))}
-              </div>
-
-              {promptLibraryVisibleCount < promptLibraryResults.length ? (
-                <button
-                  className="ghost-button wide-button"
-                  onClick={() => setPromptLibraryVisibleCount((count) => Math.min(count + PROMPT_LIBRARY_PAGE_SIZE, promptLibraryResults.length))}
-                  type="button"
-                >
-                  加载更多（{promptLibraryVisibleCount}/{promptLibraryResults.length}）
-                </button>
-              ) : null}
-            </div>
-
-            <div className="prompt-library-output">
-              <label className="field">
-                <span>已选画风</span>
-                <textarea
-                  rows={2}
-                  value={selectedPromptEntries.style?.prompt?.trim() ?? ""}
-                  onChange={(event) => {
-                    const style = selectedPromptEntries.style;
-                    if (style) {
-                      setSelectedPromptEntries((current) => ({
-                        ...current,
-                        style: { ...style, prompt: event.target.value },
-                      }));
-                    }
-                  }}
-                  placeholder="未选择画风"
-                />
-              </label>
-              <label className="field">
-                <span>已选场景/服装</span>
-                <textarea rows={3} value={buildPromptSelectionText(undefined, selectedPromptBoxes)} placeholder="未选择场景或服装" readOnly />
-              </label>
-              <button className="ghost-button wide-button" onClick={() => updateMainPromptFromSelection()} type="button">
-                写入提示词
-              </button>
-            </div>
-          </section>
-        </section>
+      ) : activePanel === "presets" ? (
+        <PresetsPage
+          store={presetStore}
+          currentParams={snapshotPresetParams(request as unknown as Record<string, unknown>)}
+          currentPrompt={request.prompt}
+          currentNegativePrompt={request.negativePrompt}
+          onChange={setPresetStore}
+          onApplyParams={applyParameterPreset}
+          onApplyTemplate={applyPromptTemplate}
+        />
       ) : activePanel === "favorites" ? (
         <section className="favorites-page" aria-label="Favorite gallery">
           <header className="settings-header">
@@ -2467,12 +2335,18 @@ function App() {
                   checked={settings.allowInvalidTls}
                   onChange={(value) => updateSetting("allowInvalidTls", value)}
                 />
+                <Toggle
+                  label="使用 NovelAI 代理"
+                  checked={settings.useNovelAiProxy}
+                  onChange={(value) => updateSetting("useNovelAiProxy", value)}
+                />
                 <label className="field">
-                  <span>NovelAI 代理地址</span>
+                  <span>NovelAI 代理地址（可选）</span>
                   <input
                     value={settings.novelAiProxyUrl}
                     onChange={(event) => updateSetting("novelAiProxyUrl", event.target.value)}
                     placeholder="http://127.0.0.1:7897"
+                    disabled={!settings.useNovelAiProxy}
                   />
                 </label>
                 <NumberField
@@ -2503,7 +2377,7 @@ function App() {
               </div>
             </section>
 
-            <section className="settings-panel wide">
+            <section className="settings-panel wide settings-translation-panel">
               <div className="section-head">
                 <WandSparkles aria-hidden="true" />
                 <h2>AI 翻译</h2>
@@ -2537,7 +2411,7 @@ function App() {
               </div>
             </section>
 
-            <section className="settings-panel wide">
+            <section className="settings-panel wide settings-defaults-panel">
               <div className="section-head">
                 <ShieldCheck aria-hidden="true" />
                 <h2>生成默认值</h2>
@@ -2624,12 +2498,13 @@ function OptionalNumberField(props: {
   );
 }
 
-function Toggle(props: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+function Toggle(props: { label: string; checked: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
   return (
-    <label className="toggle">
+    <label className={props.disabled ? "toggle disabled" : "toggle"}>
       <input
         type="checkbox"
         checked={props.checked}
+        disabled={props.disabled}
         onChange={(event) => props.onChange(event.target.checked)}
       />
       <span>{props.label}</span>
@@ -3108,21 +2983,6 @@ function growMaskSelection(source: Uint8Array, width: number, height: number, ra
   return output;
 }
 
-function PromptEntryImages(props: { entry: PromptLibraryEntry }) {
-  const images = getPromptEntryImages(props.entry);
-  if (images.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="prompt-library-images" aria-hidden="true">
-      {images.map((example) => (
-        <img key={`${props.entry.slug}-${example.id}`} src={example.url} alt="" loading="lazy" />
-      ))}
-    </div>
-  );
-}
-
 function buildTranslationSystemPrompt(direction: TranslationDirection, kind: "positive" | "negative") {
   if (direction === "en-to-zh") {
     return [
@@ -3191,11 +3051,16 @@ function loadSettings(): AppSettings {
       showPayloadPreview: parsed.showPayloadPreview ?? DEFAULT_SETTINGS.showPayloadPreview,
       enableAppLogs: parsed.enableAppLogs ?? DEFAULT_SETTINGS.enableAppLogs,
       allowInvalidTls: parsed.allowInvalidTls ?? DEFAULT_SETTINGS.allowInvalidTls,
-      novelAiProxyUrl: parsed.novelAiProxyUrl ?? DEFAULT_SETTINGS.novelAiProxyUrl,
+      useNovelAiProxy:
+        parsed.useNovelAiProxy ??
+        (Boolean(parsed.novelAiProxyUrl?.trim()) && parsed.novelAiProxyUrl?.trim() !== LEGACY_DEFAULT_NOVELAI_PROXY_URL),
+      novelAiProxyUrl:
+        parsed.novelAiProxyUrl?.trim() === LEGACY_DEFAULT_NOVELAI_PROXY_URL
+          ? ""
+          : parsed.novelAiProxyUrl ?? DEFAULT_SETTINGS.novelAiProxyUrl,
       historyDisplayLimit: clampHistoryLimit(
         parsed.historyDisplayLimit ?? DEFAULT_SETTINGS.historyDisplayLimit,
       ),
-      knowledgeServerUrl: DEFAULT_SETTINGS.knowledgeServerUrl,
       translationBaseUrl: parsed.translationBaseUrl ?? DEFAULT_SETTINGS.translationBaseUrl,
       translationApiKey: parsed.translationApiKey ?? DEFAULT_SETTINGS.translationApiKey,
       translationModel: parsed.translationModel ?? DEFAULT_SETTINGS.translationModel,
@@ -3342,110 +3207,17 @@ function normalizePromptPart(value: string) {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-function promptEntryTypeLabel(type: PromptEntryType) {
-  if (type === "style") {
-    return "画风";
-  }
-
-  return type === "scene" ? "场景" : "服装";
-}
-
-function getPromptEntryImages(entry: PromptLibraryEntry) {
-  return (entry.examples ?? [])
-    .filter((example) => example.kind === "image" && example.url)
-    .slice(0, 3);
-}
-
-function sortPromptLibraryResults(entries: PromptLibraryEntry[], type: PromptEntryType) {
-  if (type !== "style") {
-    return entries;
-  }
-
-  return [...entries].sort((left, right) => {
-    const leftImages = getPromptEntryImages(left).length;
-    const rightImages = getPromptEntryImages(right).length;
-    return rightImages - leftImages;
-  });
-}
-
-async function fetchPromptLibraryEntries(entryType: PromptEntryType) {
-  const baseUrl = normalizeServerUrl(DEFAULT_SETTINGS.knowledgeServerUrl);
-  const params = new URLSearchParams({
-    type: entryType,
-    limit: String(PROMPT_LIBRARY_MAX_RESULTS),
-  });
-  const response = await fetch(`${baseUrl}/api/entries?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error(`素材库请求失败：HTTP ${response.status}`);
-  }
-  return (await response.json()) as PromptLibraryEntry[];
-}
-
-function filterPromptLibraryEntries(entries: PromptLibraryEntry[], query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) {
-    return entries;
-  }
-
-  return entries.filter((entry) => {
-    const haystack = [
-      entry.title,
-      entry.summary,
-      entry.prompt,
-      entry.negative_prompt,
-      entry.slug,
-      entry.category?.name,
-      entry.category?.slug,
-      entry.source?.title,
-      entry.source?.slug,
-      ...(entry.tags ?? []),
-    ]
-      .filter(Boolean)
-      .join("\n")
-      .toLowerCase();
-    return haystack.includes(normalizedQuery);
-  });
-}
-
-function isPromptEntrySelected(
-  entry: PromptLibraryEntry,
-  selectedStyle: Partial<Record<PromptEntryType, PromptLibraryEntry>>,
-  selectedBoxes: Record<Exclude<PromptEntryType, "style">, PromptLibraryEntry[]>,
-) {
-  if (entry.entry_type === "style") {
-    return selectedStyle.style?.slug === entry.slug;
-  }
-  return selectedBoxes[entry.entry_type].some((item) => item.slug === entry.slug);
-}
-
-function buildPromptSelectionText(
-  styleEntry: PromptLibraryEntry | undefined,
-  selectedBoxes: Record<Exclude<PromptEntryType, "style">, PromptLibraryEntry[]>,
-) {
-  const parts: string[] = [];
-  if (styleEntry?.prompt.trim()) {
-    parts.push(styleEntry.prompt.trim());
-  }
-  for (const item of selectedBoxes.scene) {
-    if (item.prompt.trim()) {
-      parts.push(item.prompt.trim());
-    }
-  }
-  for (const item of selectedBoxes.clothing) {
-    if (item.prompt.trim()) {
-      parts.push(item.prompt.trim());
-    }
-  }
-  return parts.join(", ");
-}
-
 function effectivePrompt(request: ImageRequest) {
   const style = request.stylePrompt.trim();
   const main = request.prompt.trim();
-  if (style && main) {
-    return `${style}, ${main}`;
+  const prompt = style && main ? `${style}, ${main}` : style || main;
+
+  if (request.transparentBackground && isV5ImageModel(request.model) && prompt.trim()) {
+    const hasTransparencyTag = splitPromptParts(prompt).some((part) => normalizePromptPart(part) === "transparent background");
+    return hasTransparencyTag ? prompt : appendPromptText(prompt, "transparent background");
   }
-  return style || main;
+
+  return prompt;
 }
 
 function isTauriRuntime() {
@@ -3517,6 +3289,8 @@ function buildPayloadPreview(request: ImageRequest) {
     seed: request.seed,
     image_format: request.imageFormat,
     qualityToggle: request.qualityToggle,
+    tag_hint_transparent_background: request.transparentBackground,
+    straight_alpha: request.transparentBackground,
     ucPreset: request.ucPreset,
     params_version: request.paramsVersion,
     dynamic_thresholding: request.dynamicThresholding,
@@ -3550,7 +3324,7 @@ function buildPayloadPreview(request: ImageRequest) {
     parameters.director_reference_information_extracted = [request.directorReferenceInformationExtracted];
   }
 
-  if (isV4ImageModel(request.model)) {
+  if (isModernImageModel(request.model)) {
     const characterCaptions = buildCharacterCaptions(request);
     const useCoords = request.useCharacterCoords && characterCaptions.length > 0;
     parameters.legacy = false;
@@ -3594,7 +3368,7 @@ function buildBackendImageRequest(request: ImageRequest, settings: AppSettings) 
     ...request,
     prompt: effectivePrompt(request),
     allowInvalidTls: settings.allowInvalidTls,
-    proxyUrl: settings.novelAiProxyUrl,
+    proxyUrl: activeNovelAiProxyUrl(settings),
     model: effectiveImageModel(request),
     sourceImage: request.sourceImage?.base64,
     maskImage: request.maskImage?.base64,
@@ -3604,12 +3378,18 @@ function buildBackendImageRequest(request: ImageRequest, settings: AppSettings) 
   };
 }
 
+function activeNovelAiProxyUrl(settings: AppSettings) {
+  return settings.useNovelAiProxy ? settings.novelAiProxyUrl.trim() : "";
+}
+
 function effectiveImageModel(request: ImageRequest) {
   if (request.action !== "infill" || request.model.includes("inpainting")) {
     return request.model;
   }
 
   const map: Record<string, string> = {
+    "nai-diffusion-5-full": "nai-diffusion-5-full-inpainting",
+    "nai-diffusion-5-curated": "nai-diffusion-4-5-curated-inpainting",
     "nai-diffusion-4-5-full": "nai-diffusion-4-5-full-inpainting",
     "nai-diffusion-4-5-curated": "nai-diffusion-4-5-curated-inpainting",
     "nai-diffusion-4-full": "nai-diffusion-4-full-inpainting",
@@ -3622,8 +3402,17 @@ function effectiveImageModel(request: ImageRequest) {
   return map[request.model] ?? request.model;
 }
 
-function isV4ImageModel(model: string) {
-  return model.includes("diffusion-4");
+function isModernImageModel(model: string) {
+  return model.includes("diffusion-4") || model.includes("diffusion-5");
+}
+
+function isV5ImageModel(model: string) {
+  return model.includes("diffusion-5");
+}
+
+function getUpscaleModel(model: string) {
+  const normalized = model.replace(/-inpainting$/, "");
+  return normalized === "custom" || normalized.trim() === "" ? undefined : normalized;
 }
 
 function buildCharacterCaptions(request: ImageRequest) {
@@ -3648,6 +3437,9 @@ function normalizeImageRequest(request: ImageRequest): ImageRequest {
       y: clampCoordinate(character.y),
     })),
     useCharacterCoords: request.useCharacterCoords ?? false,
+    transparentBackground: isV5ImageModel(request.model ?? DEFAULT_REQUEST.model)
+      ? request.transparentBackground ?? DEFAULT_REQUEST.transparentBackground
+      : false,
     strength: clamp01(request.strength ?? DEFAULT_REQUEST.strength),
     noise: clamp01(request.noise ?? DEFAULT_REQUEST.noise),
     colorCorrect: request.colorCorrect ?? DEFAULT_REQUEST.colorCorrect,
@@ -3724,6 +3516,10 @@ function normalizeTier(value?: string) {
     "3": "Opus",
   };
   return map[value] ?? value;
+}
+
+function isTokenNotConfiguredError(error: unknown) {
+  return String(error).includes(TOKEN_NOT_CONFIGURED_ERROR);
 }
 
 function calculateAccountCost(before: AccountSummary | null, after: AccountSummary | null) {
@@ -3845,41 +3641,6 @@ async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {
   }
 }
 
-async function loadPromptLibraryCache(type: PromptEntryType): Promise<PromptLibraryCacheRecord | null> {
-  if (!("indexedDB" in window)) {
-    return null;
-  }
-
-  const db = await openHistoryDatabase();
-  try {
-    const tx = db.transaction(PROMPT_LIBRARY_STORE_NAME, "readonly");
-    const store = tx.objectStore(PROMPT_LIBRARY_STORE_NAME);
-    const item = await requestToPromise<PromptLibraryCacheRecord | undefined>(store.get(type));
-    if (!item || !Array.isArray(item.entries)) {
-      return null;
-    }
-    return item;
-  } finally {
-    db.close();
-  }
-}
-
-async function savePromptLibraryCache(record: PromptLibraryCacheRecord) {
-  if (!("indexedDB" in window)) {
-    return;
-  }
-
-  const db = await openHistoryDatabase();
-  try {
-    const tx = db.transaction(PROMPT_LIBRARY_STORE_NAME, "readwrite");
-    const store = tx.objectStore(PROMPT_LIBRARY_STORE_NAME);
-    await requestToPromise(store.put(record));
-    await transactionDone(tx);
-  } finally {
-    db.close();
-  }
-}
-
 async function loadFavoritesFromIndexedDb(): Promise<FavoriteItem[]> {
   if (!("indexedDB" in window)) {
     return [];
@@ -3968,9 +3729,6 @@ function openHistoryDatabase() {
       const db = request.result;
       if (!db.objectStoreNames.contains(HISTORY_STORE_NAME)) {
         db.createObjectStore(HISTORY_STORE_NAME, { keyPath: "id" });
-      }
-      if (!db.objectStoreNames.contains(PROMPT_LIBRARY_STORE_NAME)) {
-        db.createObjectStore(PROMPT_LIBRARY_STORE_NAME, { keyPath: "type" });
       }
       if (!db.objectStoreNames.contains(FAVORITES_STORE_NAME)) {
         db.createObjectStore(FAVORITES_STORE_NAME, { keyPath: "id" });
@@ -4304,6 +4062,9 @@ function parseNovelAiModelFromSource(source?: string) {
   }
 
   const normalized = source.toLowerCase();
+  if (normalized.includes("v5")) {
+    return "nai-diffusion-5-full";
+  }
   if (normalized.includes("v4.5")) {
     return "nai-diffusion-4-5-full";
   }

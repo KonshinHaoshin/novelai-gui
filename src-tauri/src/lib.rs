@@ -14,10 +14,30 @@ const GENERATE_IMAGE_URL: &str = "https://image.novelai.net/ai/generate-image";
 const AUGMENT_IMAGE_URL: &str = "https://image.novelai.net/ai/augment-image";
 const ENCODE_VIBE_URL: &str = "https://image.novelai.net/ai/encode-vibe";
 const SUGGEST_TAGS_URL: &str = "https://image.novelai.net/ai/generate-image/suggest-tags";
-const UPSCALE_IMAGE_URL: &str = "https://api.novelai.net/ai/upscale";
+const UPSCALE_IMAGE_URL: &str = "https://image.novelai.net/ai/upscale";
 const USER_DATA_URL: &str = "https://api.novelai.net/user/data";
 const USER_INFORMATION_URL: &str = "https://api.novelai.net/user/information";
 const USER_SUBSCRIPTION_URL: &str = "https://api.novelai.net/user/subscription";
+const SHARED_PRESETS_DIR: &str = "IDLECLOUD";
+const SHARED_PRESETS_FILE: &str = "shared-presets.json";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SharedPreset {
+    id: String,
+    kind: String,
+    name: String,
+    group: Option<String>,
+    payload: serde_json::Value,
+    thumbnail: Option<String>,
+    created_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SharedPresetDocument {
+    version: u32,
+    presets: Vec<SharedPreset>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +61,8 @@ pub struct ImageGenerateRequest {
     pub noise_schedule: String,
     pub image_format: String,
     pub quality_toggle: bool,
+    #[serde(default)]
+    pub transparent_background: bool,
     pub uc_preset: u32,
     pub params_version: u32,
     pub dynamic_thresholding: bool,
@@ -122,9 +144,9 @@ pub struct GenerateImageResponse {
 #[serde(rename_all = "camelCase")]
 pub struct UpscaleImageRequest {
     pub image: String,
-    pub width: u32,
-    pub height: u32,
-    pub scale: u32,
+    pub model: String,
+    #[serde(default)]
+    pub declared_blur_sigma: Option<f32>,
     #[serde(default)]
     pub allow_invalid_tls: bool,
     #[serde(default)]
@@ -179,6 +201,49 @@ fn save_api_token(token: String) -> Result<(), String> {
     entry.set_password(trimmed).map_err(to_error)
 }
 
+fn shared_presets_path() -> Result<PathBuf, String> {
+    let mut directory = dirs::data_dir().ok_or_else(|| "无法定位用户数据目录".to_string())?;
+    directory.push(SHARED_PRESETS_DIR);
+    fs::create_dir_all(&directory).map_err(to_error)?;
+    directory.push(SHARED_PRESETS_FILE);
+    Ok(directory)
+}
+
+#[tauri::command]
+fn load_shared_presets() -> Result<Option<Vec<SharedPreset>>, String> {
+    let path = shared_presets_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path).map_err(to_error)?;
+    let value: serde_json::Value = serde_json::from_str(&contents).map_err(to_error)?;
+    if let Some(document) = value.as_object() {
+        let document: SharedPresetDocument =
+            serde_json::from_value(serde_json::Value::Object(document.clone()))
+                .map_err(to_error)?;
+        return Ok(Some(document.presets));
+    }
+
+    // Accept an older/simple array export as well, so a hand-copied preset
+    // file can be imported without a one-off migration.
+    let presets: Vec<SharedPreset> = serde_json::from_value(value).map_err(to_error)?;
+    Ok(Some(presets))
+}
+
+#[tauri::command]
+fn save_shared_presets(presets: Vec<SharedPreset>) -> Result<(), String> {
+    let path = shared_presets_path()?;
+    let temporary_path = path.with_file_name(format!(".shared-presets.{}.tmp", std::process::id()));
+    let document = SharedPresetDocument {
+        version: 1,
+        presets,
+    };
+    let contents = serde_json::to_vec_pretty(&document).map_err(to_error)?;
+    fs::write(&temporary_path, contents).map_err(to_error)?;
+    fs::rename(&temporary_path, &path).map_err(to_error)
+}
+
 #[tauri::command]
 async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageResponse, String> {
     if request.prompt.trim().is_empty() {
@@ -209,7 +274,7 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
         "prefer_brownian": request.prefer_brownian,
     });
 
-    if is_v4_image_model(&api_model) {
+    if is_modern_image_model(&api_model) {
         let character_captions = build_character_captions(&request.characters);
         let use_coords = request.use_character_coords && !character_captions.is_empty();
         parameters["legacy"] = serde_json::json!(false);
@@ -246,16 +311,29 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
         });
     }
 
+    if request.transparent_background && is_v5_image_model(&api_model) {
+        parameters["tag_hint_transparent_background"] = serde_json::json!(true);
+        parameters["straight_alpha"] = serde_json::json!(true);
+    }
+
     if let Some(seed) = request.seed {
         parameters["seed"] = serde_json::json!(seed);
     }
     if let Some(value) = request.skip_cfg_above_sigma {
         parameters["skip_cfg_above_sigma"] = serde_json::json!(value);
     }
-    if let Some(image) = request.source_image.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(image) = request
+        .source_image
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         parameters["image"] = serde_json::json!(image);
     }
-    if let Some(mask) = request.mask_image.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(mask) = request
+        .mask_image
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         parameters["mask"] = serde_json::json!(mask);
     }
     if let Some(value) = request.strength {
@@ -270,9 +348,14 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
     if request.action == "img2img" || request.action == "infill" {
         parameters["color_correct"] = serde_json::json!(request.color_correct);
     }
-    if let Some(image) = request.reference_image.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(image) = request
+        .reference_image
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         parameters["reference_image"] = serde_json::json!(image);
-        parameters["reference_strength"] = serde_json::json!(request.reference_strength.unwrap_or(0.6));
+        parameters["reference_strength"] =
+            serde_json::json!(request.reference_strength.unwrap_or(0.6));
         parameters["reference_information_extracted"] =
             serde_json::json!(request.reference_information_extracted.unwrap_or(0.6));
     }
@@ -299,8 +382,9 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
             serde_json::json!([request.director_reference_strength.unwrap_or(0.6)]);
         parameters["director_reference_secondary_strength_values"] =
             serde_json::json!([request.director_reference_secondary_strength.unwrap_or(0.4)]);
-        parameters["director_reference_information_extracted"] =
-            serde_json::json!([request.director_reference_information_extracted.unwrap_or(0.6)]);
+        parameters["director_reference_information_extracted"] = serde_json::json!([request
+            .director_reference_information_extracted
+            .unwrap_or(0.6)]);
     }
 
     let payload = serde_json::json!({
@@ -316,7 +400,9 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
         .json(&payload)
         .send()
         .await
-        .map_err(to_error)?;
+        .map_err(|error| {
+            format_request_error(error, GENERATE_IMAGE_URL, request.proxy_url.as_deref())
+        })?;
 
     let status = response.status();
     let content_type = response
@@ -339,12 +425,19 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
 }
 
 #[tauri::command]
-async fn get_account_status(allow_invalid_tls: bool, proxy_url: Option<String>) -> Result<serde_json::Value, String> {
+async fn get_account_status(
+    allow_invalid_tls: bool,
+    proxy_url: Option<String>,
+) -> Result<serde_json::Value, String> {
     let token = read_token()?;
     let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
-    let data = get_json(&client, &token, USER_DATA_URL).await?;
-    let information = get_json(&client, &token, USER_INFORMATION_URL).await.ok();
-    let subscription = get_json(&client, &token, USER_SUBSCRIPTION_URL).await.ok();
+    let data = get_json(&client, &token, USER_DATA_URL, proxy_url.as_deref()).await?;
+    let information = get_json(&client, &token, USER_INFORMATION_URL, proxy_url.as_deref())
+        .await
+        .ok();
+    let subscription = get_json(&client, &token, USER_SUBSCRIPTION_URL, proxy_url.as_deref())
+        .await
+        .ok();
 
     Ok(serde_json::json!({
         "data": data,
@@ -354,7 +447,13 @@ async fn get_account_status(allow_invalid_tls: bool, proxy_url: Option<String>) 
 }
 
 #[tauri::command]
-async fn suggest_tags(model: String, prompt: String, lang: Option<String>, allow_invalid_tls: bool, proxy_url: Option<String>) -> Result<serde_json::Value, String> {
+async fn suggest_tags(
+    model: String,
+    prompt: String,
+    lang: Option<String>,
+    allow_invalid_tls: bool,
+    proxy_url: Option<String>,
+) -> Result<serde_json::Value, String> {
     let token = read_token()?;
     let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
     let response = client
@@ -367,25 +466,48 @@ async fn suggest_tags(model: String, prompt: String, lang: Option<String>, allow
         ])
         .send()
         .await
-        .map_err(to_error)?;
+        .map_err(|error| format_request_error(error, SUGGEST_TAGS_URL, proxy_url.as_deref()))?;
 
     response_json(response).await
 }
 
 #[tauri::command]
 async fn upscale_image(request: UpscaleImageRequest) -> Result<GenerateImageResponse, String> {
-    if request.scale != 2 && request.scale != 4 {
-        return Err("Upscale scale must be 2 or 4".to_string());
+    if request.image.trim().is_empty() {
+        return Err("Upscale image cannot be empty".to_string());
+    }
+    if request.model.trim().is_empty() {
+        return Err("Upscale model cannot be empty".to_string());
+    }
+    if let Some(sigma) = request.declared_blur_sigma {
+        const ALLOWED_SIGMAS: [f32; 5] = [0.30, 0.35, 0.40, 0.45, 0.50];
+        if !sigma.is_finite()
+            || !ALLOWED_SIGMAS
+                .iter()
+                .any(|allowed| (sigma - allowed).abs() < f32::EPSILON)
+        {
+            return Err(
+                "declared_blur_sigma must be one of 0.30, 0.35, 0.40, 0.45 or 0.50".to_string(),
+            );
+        }
     }
 
     let token = read_token()?;
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "image": request.image,
-        "width": request.width,
-        "height": request.height,
-        "scale": request.scale,
+        "model": request.model,
     });
-    post_zip_like(UPSCALE_IMAGE_URL, &token, payload, request.allow_invalid_tls, request.proxy_url.as_deref()).await
+    if let Some(sigma) = request.declared_blur_sigma {
+        payload["declared_blur_sigma"] = serde_json::json!(sigma);
+    }
+    post_zip_like(
+        UPSCALE_IMAGE_URL,
+        &token,
+        payload,
+        request.allow_invalid_tls,
+        request.proxy_url.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -399,7 +521,14 @@ async fn augment_image(request: AugmentImageRequest) -> Result<GenerateImageResp
         "req_type": request.req_type,
         "defry": request.defry,
     });
-    post_zip_like(AUGMENT_IMAGE_URL, &token, payload, request.allow_invalid_tls, request.proxy_url.as_deref()).await
+    post_zip_like(
+        AUGMENT_IMAGE_URL,
+        &token,
+        payload,
+        request.allow_invalid_tls,
+        request.proxy_url.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -418,7 +547,9 @@ async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, String> {
         .json(&payload)
         .send()
         .await
-        .map_err(to_error)?;
+        .map_err(|error| {
+            format_request_error(error, ENCODE_VIBE_URL, request.proxy_url.as_deref())
+        })?;
     let status = response.status();
     let body = response.bytes().await.map_err(to_error)?.to_vec();
 
@@ -480,13 +611,18 @@ fn read_token() -> Result<String, String> {
     }
 }
 
-async fn get_json(client: &reqwest::Client, token: &str, url: &str) -> Result<serde_json::Value, String> {
+async fn get_json(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+    proxy_url: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let response = client
         .get(url)
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .send()
         .await
-        .map_err(to_error)?;
+        .map_err(|error| format_request_error(error, url, proxy_url))?;
 
     response_json(response).await
 }
@@ -516,7 +652,7 @@ async fn post_zip_like(
         .json(&payload)
         .send()
         .await
-        .map_err(to_error)?;
+        .map_err(|error| format_request_error(error, url, proxy_url))?;
 
     let status = response.status();
     let content_type = response
@@ -582,6 +718,11 @@ fn decode_generated_images(
         return decode_zip_images(body);
     }
 
+    if lower.contains("application/json") {
+        let value = serde_json::from_slice::<serde_json::Value>(&body).map_err(to_error)?;
+        return decode_json_images(&value);
+    }
+
     if lower.contains("image/png") || lower.contains("image/jpeg") || lower.contains("image/webp") {
         return Ok(vec![GeneratedImage {
             file_name: default_file_name(content_type, 0),
@@ -599,6 +740,43 @@ fn decode_generated_images(
             base64: BASE64.encode(body),
         }])
     })
+}
+
+fn decode_json_images(value: &serde_json::Value) -> Result<Vec<GeneratedImage>, String> {
+    let entries = value
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "The API JSON response did not contain an images array".to_string())?;
+    let mut images = Vec::with_capacity(entries.len());
+
+    for (index, entry) in entries.iter().enumerate() {
+        let encoded = entry
+            .get("image")
+            .and_then(serde_json::Value::as_str)
+            .filter(|image| !image.trim().is_empty())
+            .ok_or_else(|| format!("The API JSON response image {index} was empty"))?;
+        let (mime_type, payload) = if let Some(data) = encoded.strip_prefix("data:") {
+            let (mime, base64) = data.split_once(";base64,").ok_or_else(|| {
+                format!("The API JSON response image {index} was not valid base64")
+            })?;
+            (mime.to_string(), base64)
+        } else {
+            ("image/png".to_string(), encoded)
+        };
+        let bytes = BASE64.decode(payload).map_err(to_error)?;
+        images.push(GeneratedImage {
+            file_name: default_file_name(&mime_type, index),
+            mime_type,
+            byte_len: bytes.len(),
+            base64: BASE64.encode(bytes),
+        });
+    }
+
+    if images.is_empty() {
+        return Err("The API JSON response did not contain any images".to_string());
+    }
+
+    Ok(images)
 }
 
 fn decode_zip_images(body: Vec<u8>) -> Result<Vec<GeneratedImage>, String> {
@@ -731,8 +909,29 @@ fn to_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
-fn is_v4_image_model(model: &str) -> bool {
-    model.contains("diffusion-4")
+fn format_request_error(error: reqwest::Error, url: &str, proxy_url: Option<&str>) -> String {
+    let proxy = proxy_url.map(str::trim).filter(|value| !value.is_empty());
+    let target = proxy
+        .map(|value| format!("代理 {value}"))
+        .unwrap_or_else(|| "当前网络".to_string());
+
+    if error.is_timeout() {
+        return format!("连接 NovelAI 超时（{url}，使用{target}）。请检查网络或代理设置。",);
+    }
+
+    if error.is_connect() {
+        return format!("无法连接 NovelAI（{url}，使用{target}）。请检查网络或代理地址是否可用。",);
+    }
+
+    format!("NovelAI 请求失败（{url}）：{}", error)
+}
+
+fn is_modern_image_model(model: &str) -> bool {
+    model.contains("diffusion-4") || model.contains("diffusion-5")
+}
+
+fn is_v5_image_model(model: &str) -> bool {
+    model.contains("diffusion-5")
 }
 
 fn effective_image_model(model: &str, action: &str) -> String {
@@ -741,6 +940,8 @@ fn effective_image_model(model: &str, action: &str) -> String {
     }
 
     match model {
+        "nai-diffusion-5-full" => "nai-diffusion-5-full-inpainting",
+        "nai-diffusion-5-curated" => "nai-diffusion-4-5-curated-inpainting",
         "nai-diffusion-4-5-full" => "nai-diffusion-4-5-full-inpainting",
         "nai-diffusion-4-5-curated" => "nai-diffusion-4-5-curated-inpainting",
         "nai-diffusion-4-full" => "nai-diffusion-4-full-inpainting",
@@ -767,7 +968,9 @@ pub fn run() {
             augment_image,
             encode_vibe,
             save_generated_image,
-            append_app_log
+            append_app_log,
+            load_shared_presets,
+            save_shared_presets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
