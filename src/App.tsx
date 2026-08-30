@@ -149,6 +149,12 @@ type ImageStreamEvent = {
   image?: GeneratedImage;
 };
 
+type GenerationProgress = {
+  received: number;
+  total: number;
+  phase: "connecting" | "receiving" | "complete";
+};
+
 type HistoryItem = {
   id: string;
   createdAt: string;
@@ -372,6 +378,7 @@ function App() {
   const [token, setToken] = useState("");
   const [hasToken, setHasToken] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgress | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [apiToolsOpen, setApiToolsOpen] = useState(true);
@@ -595,6 +602,9 @@ function App() {
   }, [styleTemplatePageCount]);
 
   const estimatedCost = useMemo(() => estimateAnlasCost(request, account), [request, account]);
+  const generationProgressPercent = generationProgress
+    ? Math.min(100, Math.round((generationProgress.received / Math.max(generationProgress.total, 1)) * 100))
+    : 0;
   const canGenerate = useMemo(
     () => {
       const hasRequiredImage =
@@ -690,10 +700,13 @@ function App() {
 
     setIsGenerating(true);
     setNotice(null);
+    const useStream = settings.useImageStream;
+    setGenerationProgress(useStream ? { received: 0, total: request.steps, phase: "connecting" } : null);
     writeAppLog("info", "generate", `开始生成：${effectiveImageModel(request)} · ${request.width}×${request.height} · ${request.action}`);
     const beforeAccountResult = await refreshAccountStatus(false);
     if (beforeAccountResult.tokenMissing) {
       setIsGenerating(false);
+      setGenerationProgress(null);
       showNotice("error", TOKEN_NOT_CONFIGURED_MESSAGE);
       return;
     }
@@ -701,24 +714,28 @@ function App() {
     const estimateBeforeGeneration = estimateAnlasCost(request, beforeAccount);
     let stopImageStream: (() => void) | undefined;
     try {
-      if (settings.useImageStream) {
+      if (useStream) {
         stopImageStream = await listen<ImageStreamEvent>("image-generation-event", ({ payload }) => {
           if (payload.kind === "image" && payload.image) {
-            setActiveImages((items) => items.some((item) => item.base64 === payload.image?.base64)
-              ? items
-              : [...items, payload.image as GeneratedImage]);
-            setSelectedImage((index) => index);
+            setActiveImages([payload.image]);
+            setSelectedImage(0);
+            setGenerationProgress((current) => ({
+              received: Math.max(current?.received ?? 0, (payload.image?.index ?? (current?.received ?? 0)) + 1),
+              total: current?.total ?? request.steps,
+              phase: "receiving",
+            }));
           }
-          if (payload.message && payload.kind !== "complete") {
-            showNotice(payload.kind === "error" ? "error" : "info", payload.message);
+          if (payload.kind === "error" && payload.message) {
+            showNotice("error", payload.message);
           }
         });
       }
       const response = await invoke<GenerateImageResponse>(
-        settings.useImageStream ? "generate_image_stream" : "generate_image",
+        useStream ? "generate_image_stream" : "generate_image",
         { request: buildBackendImageRequest(request, settings) },
       );
-      setActiveImages(response.images);
+      const displayImages = useStream ? response.images.slice(-1) : response.images;
+      setActiveImages(displayImages);
       setSelectedImage(0);
       setHistory((items) =>
         [
@@ -726,7 +743,7 @@ function App() {
             id: crypto.randomUUID(),
             createdAt: new Date().toISOString(),
             request,
-            images: response.images,
+            images: displayImages,
           },
           ...items,
         ].slice(0, MAX_HISTORY_ITEMS),
@@ -739,12 +756,16 @@ function App() {
       const afterAccountResult = await refreshAccountStatus(false);
       const cost = calculateAccountCost(beforeAccount, afterAccountResult.summary);
       setLastCost(cost);
-      showNotice(
-        "success",
-        cost === null
-          ? `收到 ${response.images.length} 张图，预计消耗 ${formatEstimatedCost(estimateBeforeGeneration)}，实际扣费暂未读取。`
-          : `收到 ${response.images.length} 张图，本次消耗 ${formatPoints(cost)} Anlas。`,
-      );
+      if (useStream) {
+        setGenerationProgress({ received: request.steps, total: request.steps, phase: "complete" });
+      } else {
+        showNotice(
+          "success",
+          cost === null
+            ? `收到 ${response.images.length} 张图，预计消耗 ${formatEstimatedCost(estimateBeforeGeneration)}，实际扣费暂未读取。`
+            : `收到 ${response.images.length} 张图，本次消耗 ${formatPoints(cost)} Anlas。`,
+        );
+      }
     } catch (error) {
       const message = String(error);
       writeAppLog(
@@ -767,6 +788,7 @@ function App() {
     } finally {
       stopImageStream?.();
       setIsGenerating(false);
+      setGenerationProgress(null);
     }
   }
 
@@ -1976,6 +1998,17 @@ function App() {
             <span>{request.width}×{request.height} · {request.steps} 步</span>
             <span>⌘⏎ 生成</span>
           </div>
+          {isGenerating && settings.useImageStream && generationProgress ? (
+            <div className="generation-progress" role="status" aria-live="polite">
+              <div className="generation-progress-head">
+                <span>{generationProgress.phase === "connecting" ? "连接中" : generationProgress.phase === "complete" ? "生成完成" : "流式生成"}</span>
+                <span>{generationProgress.received}/{generationProgress.total}</span>
+              </div>
+              <div className="generation-progress-track" aria-hidden="true">
+                <span style={{ width: `${generationProgressPercent}%` }} />
+              </div>
+            </div>
+          ) : null}
           <div
             className={estimatedCost && account?.points !== undefined && estimatedCost.total > account.points ? "prompt-cost-summary warning" : "prompt-cost-summary"}
             title="这是根据当前 NovelAI WebUI 规则计算的估算值，实际扣费以生成后刷新到的账号状态为准。"

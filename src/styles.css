@@ -1581,6 +1581,37 @@ input[type="range"]::-webkit-slider-thumb {
   font-variant-numeric: tabular-nums;
 }
 
+.generation-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 4px;
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.generation-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.generation-progress-track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(16, 16, 17, 0.1);
+}
+
+.generation-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--fg);
+  transition: width 0.2s ease;
+}
+
 .prompt-notice {
   margin-top: 1px;
 }
