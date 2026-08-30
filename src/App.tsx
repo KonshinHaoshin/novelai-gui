@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Braces,
   ChevronDown,
@@ -33,7 +34,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, PointerEvent } from "react";
+import type { ChangeEvent, ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import appIcon from "../icon.png";
 import { PresetsPage } from "./PresetsPage";
@@ -253,6 +254,11 @@ type ImportedImageMetadata = {
   nSamples?: number;
 };
 
+type PendingClipboardImage = {
+  file: File;
+  metadata: ImportedImageMetadata;
+};
+
 const HISTORY_KEY = "novelai-gui-history";
 const SETTINGS_KEY = "novelai-gui-settings";
 const HISTORY_DB_NAME = "novelai-gui";
@@ -361,10 +367,10 @@ const NOISE_SCHEDULES = ["native", "karras", "exponential", "polyexponential"];
 
 const SIZE_PRESETS = [
   { label: "1:1", width: 1024, height: 1024 },
-  { label: "3:4", width: 896, height: 1152 },
-  { label: "4:3", width: 1152, height: 896 },
-  { label: "16:9", width: 1216, height: 684 },
-  { label: "9:16", width: 832, height: 1216 },
+  { label: "3:4", width: 832, height: 1216 },
+  { label: "4:3", width: 1216, height: 832 },
+  { label: "16:9", width: 1344, height: 768 },
+  { label: "9:16", width: 768, height: 1344 },
 ];
 
 const UPSCALE_BLUR_SIGMAS = [0, 0.3, 0.35, 0.4, 0.45, 0.5] as const;
@@ -381,6 +387,7 @@ function App() {
   const [generationProgress, setGenerationProgress] = useState<GenerationProgress | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [pendingClipboardImage, setPendingClipboardImage] = useState<PendingClipboardImage | null>(null);
   const [apiToolsOpen, setApiToolsOpen] = useState(true);
   const [characterOpen, setCharacterOpen] = useState(false);
   const [expandedCharacterId, setExpandedCharacterId] = useState<string | null>(null);
@@ -1424,15 +1431,53 @@ function App() {
     }
   }
 
+  async function prepareClipboardImage(file: File) {
+    let metadata: ImportedImageMetadata = {
+      textChunkCount: 0,
+      textChunkKeywords: [],
+    };
+    try {
+      metadata = await parseNovelAiImageMetadata(await file.arrayBuffer());
+    } catch {
+      // JPEG and ordinary screenshots do not contain the PNG/WebP metadata
+      // understood by the importer, but they can still be used by Vibe.
+    }
+    setPendingClipboardImage({ file, metadata });
+  }
+
+  function readPendingClipboardMetadata() {
+    const pending = pendingClipboardImage;
+    setPendingClipboardImage(null);
+    if (!pending) {
+      return;
+    }
+    if (!hasNovelAiMetadata(pending.metadata)) {
+      reportMissingImageMetadata(pending.file, pending.metadata);
+      return;
+    }
+    applyImportedMetadata(pending.metadata, pending.file.name);
+  }
+
+  function usePendingClipboardForVibe() {
+    const pending = pendingClipboardImage;
+    setPendingClipboardImage(null);
+    if (pending) {
+      void handleMultipleAssetFiles([pending.file], "vibeSourceImages");
+    }
+  }
+
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
-      const file = findMetadataImageFileFromClipboard(event.clipboardData);
+      if (event.defaultPrevented) {
+        return;
+      }
+      const file = findImageFileFromClipboard(event.clipboardData);
       if (!file) {
         return;
       }
 
       event.preventDefault();
-      void importImageMetadataFile(file);
+      void prepareClipboardImage(file);
     };
 
     window.addEventListener("paste", handlePaste);
@@ -1476,18 +1521,58 @@ function App() {
       return;
     }
 
+    await handleMultipleAssetFiles(files, key);
+  }
+
+  async function handleMultipleAssetFiles(
+    files: File[],
+    key: "vibeSourceImages" | "directorReferenceImages",
+  ) {
+    const imageFiles = files.filter(isImageFile);
+    if (imageFiles.length === 0) {
+      showNotice("info", "请提供 PNG、JPG 或 WEBP 图片。");
+      return;
+    }
+
     try {
-      const nextAssets = await Promise.all(files.map(imageAssetFromFile));
-      const existingAssets = request[key] ?? [];
-      const assets = [...existingAssets, ...nextAssets.filter((asset) => !existingAssets.some((item) => item.base64 === asset.base64))].slice(0, 4);
-      update(key, assets);
-      if (key === "vibeSourceImages") {
-        update("vibeSourceImage", assets[0]);
-      } else {
-        update("directorReferenceImage", assets[0]);
-      }
+      appendMultipleAssets(await Promise.all(imageFiles.map(imageAssetFromFile)), key);
     } catch (error) {
       showNotice("error", `读取图片失败：${String(error)}`);
+    }
+  }
+
+  async function handleMultipleAssetPaths(
+    paths: string[],
+    key: "vibeSourceImages" | "directorReferenceImages",
+  ) {
+    const imagePaths = paths.filter(isImagePath);
+    if (imagePaths.length === 0) {
+      showNotice("info", "请拖入 PNG、JPG 或 WEBP 图片。");
+      return;
+    }
+
+    try {
+      const nextAssets = await Promise.all(
+        imagePaths.slice(0, 4).map((path) => invoke<ImageAsset>("read_image_file", { path })),
+      );
+      appendMultipleAssets(nextAssets, key);
+    } catch (error) {
+      showNotice("error", `读取拖入图片失败：${String(error)}`);
+    }
+  }
+
+  function appendMultipleAssets(nextAssets: ImageAsset[], key: "vibeSourceImages" | "directorReferenceImages") {
+    const existingAssets = request[key] ?? [];
+    const assets = [...existingAssets, ...nextAssets.filter((asset) => !existingAssets.some((item) => item.base64 === asset.base64))].slice(0, 4);
+    update(key, assets);
+    if (key === "vibeSourceImages") {
+      update("vibeSourceImage", assets[0]);
+      update("referenceImage", undefined);
+      update("referenceImages", []);
+      update("referenceStrengths", []);
+      update("referenceInformationExtractedMultiple", []);
+    } else {
+      update("directorReferenceImage", assets[0]);
     }
   }
 
@@ -1711,6 +1796,7 @@ function App() {
                       update("width", preset.width);
                       update("height", preset.height);
                     }}
+                    title={`${preset.label} · ${preset.width}×${preset.height}`}
                     type="button"
                   >
                     {preset.label}
@@ -2240,6 +2326,7 @@ function App() {
                 <MultiAssetPicker
                   assets={request.vibeSourceImages.length > 0 ? request.vibeSourceImages : request.vibeSourceImage ? [request.vibeSourceImage] : []}
                   label="Vibe 参考图（可多选）"
+                  dropHint="点击、拖入或粘贴图片"
                   onClear={() => {
                     update("vibeSourceImage", undefined);
                     update("vibeSourceImages", []);
@@ -2248,6 +2335,9 @@ function App() {
                     update("referenceStrengths", []);
                     update("referenceInformationExtractedMultiple", []);
                   }}
+                  onFiles={(files) => void handleMultipleAssetFiles(files, "vibeSourceImages")}
+                  onClipboardImage={(file) => void prepareClipboardImage(file)}
+                  onPaths={(paths) => void handleMultipleAssetPaths(paths, "vibeSourceImages")}
                   onPick={() => vibeImageInputRef.current?.click()}
                 />
                 <div className="field-grid">
@@ -2870,6 +2960,15 @@ function App() {
           }}
         />
       ) : null}
+      {pendingClipboardImage ? (
+        <ClipboardImageChoiceModal
+          file={pendingClipboardImage.file}
+          hasMetadata={hasNovelAiMetadata(pendingClipboardImage.metadata)}
+          onCancel={() => setPendingClipboardImage(null)}
+          onReadMetadata={readPendingClipboardMetadata}
+          onUseVibe={usePendingClipboardForVibe}
+        />
+      ) : null}
   </main>
 );
 }
@@ -3277,19 +3376,150 @@ function AssetPicker(props: {
 function MultiAssetPicker(props: {
   label: string;
   assets: ImageAsset[];
+  dropHint?: string;
   onPick: () => void;
   onClear: () => void;
+  onFiles?: (files: File[]) => void;
+  onClipboardImage?: (file: File) => void;
+  onPaths?: (paths: string[]) => void;
 }) {
+  const zoneRef = useRef<HTMLDivElement | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  const canDrop = Boolean(props.onFiles || props.onPaths);
+
+  useEffect(() => {
+    if (!props.onPaths || !isTauriRuntime()) {
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    const pending = getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload;
+      if (payload.type === "leave") {
+        setDropActive(false);
+        return;
+      }
+
+      const ratio = window.devicePixelRatio || 1;
+      const x = (payload.position?.x ?? 0) / ratio;
+      const y = (payload.position?.y ?? 0) / ratio;
+      const bounds = zoneRef.current?.getBoundingClientRect();
+      const inside = Boolean(bounds && x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom);
+      const paths = payload.type === "enter" || payload.type === "drop" ? payload.paths : [];
+
+      if (payload.type === "enter") {
+        setDropActive(inside && paths.length > 0);
+      } else if (payload.type === "over") {
+        if (inside) {
+          setDropActive(paths.length > 0);
+        }
+      } else if (payload.type === "drop") {
+        setDropActive(false);
+        if (inside && paths.length > 0) {
+          props.onPaths?.(paths);
+        }
+      }
+    });
+
+    pending
+      .then((cleanup) => {
+        if (disposed) {
+          cleanup();
+        } else {
+          unlisten = cleanup;
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [props.onPaths]);
+
+  function handleDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    if (!canDrop) {
+      return;
+    }
+    event.preventDefault();
+    setDropActive(true);
+  }
+
+  function handleDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+    if (event.relatedTarget && event.currentTarget.contains(event.relatedTarget as Node)) {
+      return;
+    }
+    setDropActive(false);
+  }
+
+  function handleDrop(event: ReactDragEvent<HTMLDivElement>) {
+    if (!canDrop) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDropActive(false);
+    const files = Array.from(event.dataTransfer.files).filter(isImageFile);
+    if (files.length > 0) {
+      props.onFiles?.(files);
+    }
+  }
+
+  function handlePaste(event: ReactClipboardEvent<HTMLDivElement>) {
+    if (!props.onFiles) {
+      return;
+    }
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+      .filter(isImageFile);
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (props.onClipboardImage) {
+      props.onClipboardImage(files[0]);
+    } else {
+      props.onFiles?.(files);
+    }
+  }
+
+  function handleZoneClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!canDrop || !props.onPick) {
+      return;
+    }
+    const target = event.target as HTMLElement;
+    if (target.closest("button")) {
+      return;
+    }
+    props.onPick();
+  }
+
   return (
-    <div className="asset-picker multi-asset-picker">
+    <div
+      ref={zoneRef}
+      className={`asset-picker multi-asset-picker${canDrop ? " asset-dropzone" : ""}${dropActive ? " drop-active" : ""}`}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      onClick={handleZoneClick}
+      onPaste={handlePaste}
+      role={canDrop ? "group" : undefined}
+      tabIndex={canDrop ? 0 : undefined}
+      aria-label={canDrop ? `${props.label}，支持点击、拖入或粘贴图片` : undefined}
+    >
       <div className="multi-asset-thumbs">
         {props.assets.length > 0 ? props.assets.map((asset) => (
           <img key={`${asset.name}-${asset.base64.slice(0, 12)}`} src={`data:${asset.mimeType};base64,${asset.base64}`} alt={asset.name} />
         )) : <ImagePlus aria-hidden="true" />}
       </div>
-      <div>
+      <div className="asset-picker-copy">
         <span>{props.label}</span>
         <strong>{props.assets.length > 0 ? `${props.assets.length} 张已选择` : "未选择"}</strong>
+        {props.dropHint ? <small>{props.dropHint}</small> : null}
       </div>
       <button className="ghost-button" onClick={props.onPick} type="button">
         {props.assets.length > 0 ? "追加" : "选择"}
@@ -3299,6 +3529,76 @@ function MultiAssetPicker(props: {
           <Eraser aria-hidden="true" />
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function ClipboardImageChoiceModal(props: {
+  file: File;
+  hasMetadata: boolean;
+  onCancel: () => void;
+  onReadMetadata: () => void;
+  onUseVibe: () => void;
+}) {
+  const [previewUrl, setPreviewUrl] = useState("");
+
+  useEffect(() => {
+    const url = URL.createObjectURL(props.file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [props.file]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        props.onCancel();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [props.onCancel]);
+
+  return (
+    <div
+      className="modal-backdrop clipboard-choice-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          props.onCancel();
+        }
+      }}
+    >
+      <section className="clipboard-choice-modal" role="dialog" aria-modal="true" aria-labelledby="clipboard-choice-title">
+        <div className="clipboard-choice-head">
+          <div>
+            <p className="eyebrow">Clipboard</p>
+            <h2 id="clipboard-choice-title">粘贴图片</h2>
+          </div>
+          <button className="icon-button" onClick={props.onCancel} aria-label="取消粘贴" title="取消" type="button">
+            <X aria-hidden="true" />
+          </button>
+        </div>
+        <div className="clipboard-choice-content">
+          <div className="clipboard-choice-preview">
+            {previewUrl ? <img src={previewUrl} alt="待粘贴图片" /> : <ImagePlus aria-hidden="true" />}
+          </div>
+          <div className="clipboard-choice-info">
+            <strong>{props.file.name || "剪贴板图片"}</strong>
+            <span>{props.hasMetadata ? "检测到 NovelAI 生成信息" : "未检测到可读取的 NovelAI 生成信息"}</span>
+            <small>请选择这张图片的用途</small>
+          </div>
+        </div>
+        <div className="clipboard-choice-actions">
+          <button className="ghost-button" onClick={props.onReadMetadata} type="button">
+            <Braces aria-hidden="true" />
+            读取图片信息
+          </button>
+          <button className="run-button" onClick={props.onUseVibe} type="button">
+            <WandSparkles aria-hidden="true" />
+            使用 Vibe Transfer
+          </button>
+        </div>
+        <button className="clipboard-choice-cancel" onClick={props.onCancel} type="button">取消</button>
+      </section>
     </div>
   );
 }
@@ -3975,10 +4275,18 @@ async function imageAssetFromFile(file: File): Promise<ImageAsset> {
   }
   const mimeType = dataUrl.slice("data:".length, markerIndex) || file.type || "image/png";
   return {
-    name: file.name,
+    name: file.name || `clipboard-${Date.now()}.png`,
     mimeType,
     base64: dataUrl.slice(markerIndex + marker.length),
   };
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith("image/") || isImagePath(file.name);
+}
+
+function isImagePath(path: string) {
+  return /\.(png|jpe?g|webp|bmp|gif)$/i.test(path);
 }
 
 function generatedImageToAsset(image: GeneratedImage): ImageAsset {
@@ -5090,7 +5398,7 @@ function parseNovelAiModelFromSource(source?: string) {
   return undefined;
 }
 
-function findMetadataImageFileFromClipboard(data: DataTransfer | null) {
+function findImageFileFromClipboard(data: DataTransfer | null) {
   if (!data) {
     return null;
   }
@@ -5101,26 +5409,18 @@ function findMetadataImageFileFromClipboard(data: DataTransfer | null) {
     }
 
     const file = item.getAsFile();
-    if (file && isMetadataImageFile(file)) {
+    if (file && isImageFile(file)) {
       return ensureNamedClipboardImageFile(file);
     }
   }
 
   for (const file of Array.from(data.files)) {
-    if (isMetadataImageFile(file)) {
+    if (isImageFile(file)) {
       return ensureNamedClipboardImageFile(file);
     }
   }
 
   return null;
-}
-
-function isMetadataImageFile(file: File) {
-  const name = file.name.toLowerCase();
-  return file.type === "image/png" ||
-    file.type === "image/webp" ||
-    name.endsWith(".png") ||
-    name.endsWith(".webp");
 }
 
 function ensureNamedClipboardImageFile(file: File) {

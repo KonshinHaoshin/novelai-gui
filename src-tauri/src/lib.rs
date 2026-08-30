@@ -223,6 +223,14 @@ pub struct EncodeVibeRequest {
     pub proxy_url: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAssetResponse {
+    pub name: String,
+    pub mime_type: String,
+    pub base64: String,
+}
+
 #[tauri::command]
 fn has_api_token() -> Result<bool, String> {
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
@@ -835,6 +843,41 @@ async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, String> {
     }
 
     Ok(BASE64.encode(body))
+}
+
+#[tauri::command]
+fn read_image_file(path: String) -> Result<ImageAssetResponse, String> {
+    let path = PathBuf::from(path.trim());
+    if !path.is_file() {
+        return Err("拖入的图片文件不存在。".to_string());
+    }
+
+    let mime_type = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "gif" => "image/gif",
+        _ => return Err("仅支持 PNG、JPG、WEBP、BMP 或 GIF 图片。".to_string()),
+    };
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("dropped-image.png")
+        .to_string();
+    let bytes = fs::read(&path).map_err(to_error)?;
+
+    Ok(ImageAssetResponse {
+        name,
+        mime_type: mime_type.to_string(),
+        base64: BASE64.encode(bytes),
+    })
 }
 
 #[tauri::command]
@@ -1473,6 +1516,7 @@ pub fn run() {
             upscale_image,
             augment_image,
             encode_vibe,
+            read_image_file,
             save_generated_image,
             pick_save_directory,
             reveal_in_finder,
