@@ -63,3 +63,31 @@ jobs:
           path: src-tauri/target/${{ matrix.target }}/release/bundle/**
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download desktop packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: novelai-gui-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Collect release installers
+        shell: bash
+        run: |
+          mkdir -p release-files
+          find release-assets -type f \( -name '*.dmg' -o -name '*.exe' \) -exec cp {} release-files/ \;
+          test -n "$(find release-files -type f -print -quit)"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-files/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
