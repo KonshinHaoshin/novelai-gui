@@ -1,7 +1,6 @@
 import {
   Check,
   Copy,
-  Frame,
   Loader2,
   PencilLine,
   Plus,
@@ -12,35 +11,29 @@ import {
 import { useEffect, useState } from "react";
 import type { PresetKind, PresetPayload, PresetStore, SavedPreset } from "./presets";
 
-type PresetTab = "params" | "templates";
-
 type PresetsPageProps = {
   store: PresetStore;
-  currentParams: PresetPayload;
-  currentPrompt: string;
+  currentStylePrompt: string;
   currentNegativePrompt: string;
   onChange: (store: PresetStore) => void;
-  onApplyParams: (preset: SavedPreset) => void;
-  onApplyTemplate: (preset: SavedPreset) => void;
+  onApplyStyle: (preset: SavedPreset) => void;
 };
 
 export function PresetsPage(props: PresetsPageProps) {
-  const [tab, setTab] = useState<PresetTab>("params");
   const [editing, setEditing] = useState<SavedPreset | null>(null);
   const [creating, setCreating] = useState<PresetKind | null>(null);
-
-  const items = tab === "params" ? props.store.params : props.store.templates;
+  const items = props.store.templates;
 
   return (
-    <section className="presets-page" aria-label="预设">
+    <section className="presets-page" aria-label="画风">
       <header className="presets-header">
         <div>
-          <h1>预设</h1>
-          <p>参数预设与提示词模板</p>
+          <h1>画风</h1>
+          <p>保存和管理常用画风提示词</p>
         </div>
         <button
           className="run-button preset-create-button"
-          onClick={() => setCreating(tab === "params" ? "params" : "prompt_template")}
+          onClick={() => setCreating("prompt_template")}
           type="button"
         >
           <Plus aria-hidden="true" />
@@ -48,30 +41,9 @@ export function PresetsPage(props: PresetsPageProps) {
         </button>
       </header>
 
-      <div className="preset-tabs" role="tablist" aria-label="预设类型">
-        <button
-          className={tab === "params" ? "preset-tab active" : "preset-tab"}
-          aria-selected={tab === "params"}
-          onClick={() => setTab("params")}
-          role="tab"
-          type="button"
-        >
-          参数预设 <span>{props.store.params.length}</span>
-        </button>
-        <button
-          className={tab === "templates" ? "preset-tab active" : "preset-tab"}
-          aria-selected={tab === "templates"}
-          onClick={() => setTab("templates")}
-          role="tab"
-          type="button"
-        >
-          提示词模板 <span>{props.store.templates.length}</span>
-        </button>
-      </div>
-
-      <div className="presets-content" role="tabpanel">
+      <div className="presets-content">
         {items.length === 0 ? (
-          <EmptyPreset kind={tab === "params" ? "params" : "prompt_template"} />
+          <EmptyPreset />
         ) : (
           <div className="preset-list">
             {items.map((preset) => (
@@ -86,11 +58,7 @@ export function PresetsPage(props: PresetsPageProps) {
                   props.onChange(removePreset(props.store, preset));
                 }}
                 onApply={() => {
-                  if (preset.kind === "params") {
-                    props.onApplyParams(preset);
-                  } else {
-                    props.onApplyTemplate(preset);
-                  }
+                  props.onApplyStyle(preset);
                 }}
               />
             ))}
@@ -101,8 +69,7 @@ export function PresetsPage(props: PresetsPageProps) {
       {creating ? (
         <PresetEditor
           kind={creating}
-          currentParams={props.currentParams}
-          currentPrompt={props.currentPrompt}
+          currentStylePrompt={props.currentStylePrompt}
           currentNegativePrompt={props.currentNegativePrompt}
           onClose={() => setCreating(null)}
           onSave={(preset) => {
@@ -116,8 +83,7 @@ export function PresetsPage(props: PresetsPageProps) {
         <PresetEditor
           kind={editing.kind}
           preset={editing}
-          currentParams={props.currentParams}
-          currentPrompt={props.currentPrompt}
+          currentStylePrompt={props.currentStylePrompt}
           currentNegativePrompt={props.currentNegativePrompt}
           onClose={() => setEditing(null)}
           onSave={(preset) => {
@@ -137,28 +103,17 @@ function PresetCard(props: {
   onApply: () => void;
 }) {
   const params = props.preset.payload;
-  const isParams = props.preset.kind === "params";
-  const details = isParams
-    ? [
-        typeof params.model === "string" ? modelLabel(String(params.model)) : "默认模型",
-        typeof params.width === "number" && typeof params.height === "number"
-          ? `${params.width} × ${params.height}`
-          : null,
-        typeof params.steps === "number" ? `${params.steps} steps` : null,
-        typeof params.scale === "number" ? `CFG ${params.scale}` : null,
-      ].filter(Boolean)
-    : [];
 
   return (
     <article className="preset-card">
       <div className="preset-card-icon" aria-hidden="true">
-        {isParams ? <Frame /> : <WandSparkles />}
+        <WandSparkles />
       </div>
       <div className="preset-card-body">
         <div className="preset-card-title-row">
           <div>
             <h2>{props.preset.name}</h2>
-            <span>{props.preset.group || (isParams ? "参数配置" : "提示词模板")}</span>
+            <span>{props.preset.group || "画风预设"}</span>
           </div>
           <div className="preset-card-actions">
             <button aria-label={`编辑 ${props.preset.name}`} onClick={props.onEdit} type="button">
@@ -175,20 +130,16 @@ function PresetCard(props: {
           </div>
         </div>
 
-        {isParams ? (
-          <p className="preset-card-preview">{details.join(" · ") || "空参数预设"}</p>
-        ) : (
-          <div className="preset-card-prompts">
-            <p>{String(params.prompt ?? "（无正向提示词）")}</p>
-            {params.negativePrompt ? <span>反向：{String(params.negativePrompt)}</span> : null}
-          </div>
-        )}
+        <div className="preset-card-prompts">
+          <p>{String(params.prompt ?? params.stylePrompt ?? "（无画风提示词）")}</p>
+          {params.negativePrompt ? <span>反向：{String(params.negativePrompt)}</span> : null}
+        </div>
 
         <div className="preset-card-footer">
           <span>{new Date(props.preset.createdAt).toLocaleDateString()}</span>
           <button className="outline-button" onClick={props.onApply} type="button">
-            {isParams ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-            {isParams ? "应用到工作台" : "填入提示词"}
+            <Copy aria-hidden="true" />
+            应用到画风
           </button>
         </div>
       </div>
@@ -196,14 +147,14 @@ function PresetCard(props: {
   );
 }
 
-function EmptyPreset({ kind }: { kind: PresetKind }) {
+function EmptyPreset() {
   return (
     <div className="preset-empty">
       <div className="preset-empty-icon" aria-hidden="true">
-        <Frame />
+        <WandSparkles />
       </div>
-      <strong>还没有{kind === "params" ? "参数预设" : "提示词模板"}</strong>
-      <span>点击右上角“新建”开始保存常用配置</span>
+      <strong>还没有画风预设</strong>
+      <span>点击右上角“新建”开始保存常用画风</span>
     </div>
   );
 }
@@ -211,8 +162,7 @@ function EmptyPreset({ kind }: { kind: PresetKind }) {
 function PresetEditor(props: {
   kind: PresetKind;
   preset?: SavedPreset;
-  currentParams: PresetPayload;
-  currentPrompt: string;
+  currentStylePrompt: string;
   currentNegativePrompt: string;
   onClose: () => void;
   onSave: (preset: SavedPreset) => void;
@@ -222,9 +172,7 @@ function PresetEditor(props: {
   const [group, setGroup] = useState(existing?.group ?? "");
   const [payload, setPayload] = useState<PresetPayload>(
     existing?.payload ??
-      (props.kind === "params"
-        ? props.currentParams
-        : { prompt: props.currentPrompt, negativePrompt: props.currentNegativePrompt }),
+      { prompt: props.currentStylePrompt, negativePrompt: props.currentNegativePrompt },
   );
   const [saving, setSaving] = useState(false);
 
@@ -266,9 +214,9 @@ function PresetEditor(props: {
       >
         <header className="preset-modal-header">
           <div>
-            <p className="eyebrow">{props.kind === "params" ? "Parameter preset" : "Prompt template"}</p>
+            <p className="eyebrow">Style preset</p>
             <h2 id="preset-editor-title">
-              {existing ? "编辑" : "新建"}{props.kind === "params" ? "参数预设" : "提示词模板"}
+              {existing ? "编辑" : "新建"}画风预设
             </h2>
           </div>
           <button aria-label="关闭" className="icon-button" onClick={props.onClose} type="button">
@@ -286,39 +234,26 @@ function PresetEditor(props: {
             <input value={group} onChange={(event) => setGroup(event.target.value)} placeholder="例如：人物 / 风格" />
           </label>
 
-          {props.kind === "params" ? (
-            <div className="preset-capture-box">
-              <div>
-                <strong>当前工作台参数</strong>
-                <span>{formatParams(payload)}</span>
-              </div>
-              <button className="ghost-button" onClick={() => setPayload(props.currentParams)} type="button">
-                <WandSparkles aria-hidden="true" />
-                用当前工作台覆盖
-              </button>
-            </div>
-          ) : (
-            <div className="preset-prompt-fields">
-              <label className="field">
-                <span>正向提示词</span>
-                <textarea
-                  rows={5}
-                  value={String(payload.prompt ?? "")}
-                  onChange={(event) => setPayload((current) => ({ ...current, prompt: event.target.value }))}
-                  placeholder="1girl, masterpiece..."
-                />
-              </label>
-              <label className="field">
-                <span>反向提示词</span>
-                <textarea
-                  rows={3}
-                  value={String(payload.negativePrompt ?? "")}
-                  onChange={(event) => setPayload((current) => ({ ...current, negativePrompt: event.target.value }))}
-                  placeholder="lowres, bad anatomy..."
-                />
-              </label>
-            </div>
-          )}
+          <div className="preset-prompt-fields">
+            <label className="field">
+              <span>画风提示词</span>
+              <textarea
+                rows={5}
+                value={String(payload.prompt ?? payload.stylePrompt ?? "")}
+                onChange={(event) => setPayload((current) => ({ ...current, prompt: event.target.value }))}
+                placeholder="official art, anime style, watercolor..."
+              />
+            </label>
+            <label className="field">
+              <span>反向提示词（可选）</span>
+              <textarea
+                rows={3}
+                value={String(payload.negativePrompt ?? "")}
+                onChange={(event) => setPayload((current) => ({ ...current, negativePrompt: event.target.value }))}
+                placeholder="lowres, bad anatomy..."
+              />
+            </label>
+          </div>
         </div>
 
         <footer className="preset-modal-footer">
@@ -349,23 +284,4 @@ function removePreset(store: PresetStore, preset: SavedPreset): PresetStore {
   return preset.kind === "params"
     ? { ...store, params: store.params.filter((item) => item.id !== preset.id) }
     : { ...store, templates: store.templates.filter((item) => item.id !== preset.id) };
-}
-
-function modelLabel(model: string) {
-  return model
-    .replace(/^nai-diffusion-/, "NAI ")
-    .replace(/-/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function formatParams(payload: PresetPayload) {
-  const values = [
-    typeof payload.model === "string" ? modelLabel(payload.model) : null,
-    typeof payload.width === "number" && typeof payload.height === "number"
-      ? `${payload.width} × ${payload.height}`
-      : null,
-    typeof payload.steps === "number" ? `${payload.steps} steps` : null,
-    typeof payload.scale === "number" ? `CFG ${payload.scale}` : null,
-  ];
-  return values.filter(Boolean).join(" · ") || "将当前工作台的参数保存下来";
 }

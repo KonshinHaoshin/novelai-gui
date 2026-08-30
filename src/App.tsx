@@ -1,13 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Braces,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronsLeft,
   ChevronsRight,
   Copy,
   Download,
   Eraser,
-  Frame,
+  FolderOpen,
   Heart,
   History,
   Images,
@@ -15,7 +18,7 @@ import {
   KeyRound,
   Loader2,
   Maximize2,
-  RotateCcw,
+  MoreHorizontal,
   Save,
   Search,
   Settings2,
@@ -23,7 +26,6 @@ import {
   SlidersHorizontal,
   Sparkles,
   RefreshCw,
-  Upload,
   UserPlus,
   Users,
   WandSparkles,
@@ -32,6 +34,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, PointerEvent } from "react";
+import { createPortal } from "react-dom";
 import appIcon from "../icon.png";
 import { PresetsPage } from "./PresetsPage";
 import {
@@ -40,7 +43,6 @@ import {
   mergePresetStores,
   savePresetStore,
   SHARED_PRESETS_MIGRATED_KEY,
-  snapshotPresetParams,
   toSharedPresets,
   type PresetStore,
   type SavedPreset,
@@ -78,6 +80,11 @@ type ImageRequest = {
   skipCfgAboveSigma?: number;
   deliberateEulerAncestralBug: boolean;
   preferBrownian: boolean;
+  addOriginalImage: boolean;
+  legacyV3Extend: boolean;
+  tagHintQt?: number;
+  upscaleBlurSigma?: number;
+  upscaledEnhance: boolean;
   sourceImage?: ImageAsset;
   maskImage?: ImageAsset;
   strength: number;
@@ -85,14 +92,26 @@ type ImageRequest = {
   extraNoiseSeed?: number;
   colorCorrect: boolean;
   vibeSourceImage?: ImageAsset;
+  vibeSourceImages: ImageAsset[];
   referenceImage?: string;
+  referenceImages: string[];
+  referenceStrengths: number[];
+  referenceInformationExtractedMultiple: number[];
   referenceStrength: number;
   referenceInformationExtracted: number;
   directorReferenceImage?: ImageAsset;
+  directorReferenceImages: ImageAsset[];
+  directorReferenceMode: "character" | "character&style";
   directorReferencePrompt: string;
   directorReferenceStrength: number;
   directorReferenceSecondaryStrength: number;
   directorReferenceInformationExtracted: number;
+  controlnetCondition: string;
+  controlnetModel: string;
+  controlnetStrength: number;
+  vibeCropToMask: boolean;
+  vibeFocusSeed?: number;
+  vibeInfoExtractSeed?: number;
 };
 
 type CharacterPrompt = {
@@ -108,6 +127,9 @@ type GeneratedImage = {
   mimeType: string;
   byteLen: number;
   base64: string;
+  savedPath?: string;
+  index?: number;
+  seed?: number;
 };
 
 type ImageAsset = {
@@ -119,6 +141,12 @@ type ImageAsset = {
 type GenerateImageResponse = {
   contentType: string;
   images: GeneratedImage[];
+};
+
+type ImageStreamEvent = {
+  kind: "progress" | "image" | "error" | "complete";
+  message?: string;
+  image?: GeneratedImage;
 };
 
 type HistoryItem = {
@@ -157,18 +185,34 @@ type AppSettings = {
   allowInvalidTls: boolean;
   useNovelAiProxy: boolean;
   novelAiProxyUrl: string;
+  saveDirectory: string;
   historyDisplayLimit: number;
   translationBaseUrl: string;
   translationApiKey: string;
   translationModel: string;
+  useImageStream: boolean;
 };
 
 type AccountSummary = {
   tier?: string;
   points?: number;
+  subscriptionPoints?: number;
+  purchasedPoints?: number;
+  trialImagesLeft?: number;
+  trialActivated?: boolean;
   active?: boolean;
   expiresAt?: number;
   raw: unknown;
+};
+
+type AnlasEstimate = {
+  total: number;
+  perImage: number;
+  billableSamples: number;
+  freeSamples: number;
+  freeReason?: "paper-membership" | "paper-trial" | "opus";
+  opusDiscountApplied: boolean;
+  referenceSurcharge: number;
 };
 
 type TagSuggestion = {
@@ -218,10 +262,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   allowInvalidTls: false,
   useNovelAiProxy: false,
   novelAiProxyUrl: "",
+  saveDirectory: "",
   historyDisplayLimit: 8,
   translationBaseUrl: "",
   translationApiKey: "",
   translationModel: "",
+  useImageStream: true,
 };
 
 const DEFAULT_REQUEST: ImageRequest = {
@@ -253,12 +299,25 @@ const DEFAULT_REQUEST: ImageRequest = {
   strength: 0.55,
   noise: 0,
   colorCorrect: true,
+  vibeSourceImages: [],
   referenceStrength: 0.6,
   referenceInformationExtracted: 0.6,
   directorReferencePrompt: "",
   directorReferenceStrength: 0.6,
   directorReferenceSecondaryStrength: 0.4,
   directorReferenceInformationExtracted: 0.6,
+  addOriginalImage: false,
+  legacyV3Extend: false,
+  upscaledEnhance: false,
+  referenceImages: [],
+  referenceStrengths: [],
+  referenceInformationExtractedMultiple: [],
+  directorReferenceImages: [],
+  directorReferenceMode: "character",
+  controlnetCondition: "",
+  controlnetModel: "",
+  controlnetStrength: 0.6,
+  vibeCropToMask: false,
 };
 
 const MODELS = [
@@ -302,7 +361,7 @@ const SIZE_PRESETS = [
   { label: "9:16", width: 832, height: 1216 },
 ];
 
-const UPSCALE_BLUR_SIGMAS = [0.3, 0.35, 0.4, 0.45, 0.5] as const;
+const UPSCALE_BLUR_SIGMAS = [0, 0.3, 0.35, 0.4, 0.45, 0.5] as const;
 
 function App() {
   const [request, setRequest] = useState<ImageRequest>(DEFAULT_REQUEST);
@@ -319,9 +378,10 @@ function App() {
   const [characterOpen, setCharacterOpen] = useState(false);
   const [expandedCharacterId, setExpandedCharacterId] = useState<string | null>(null);
   const [stylePromptOpen, setStylePromptOpen] = useState(true);
+  const [styleTemplatePage, setStyleTemplatePage] = useState(0);
   const [sizePresetOpen, setSizePresetOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
-  const [activePanel, setActivePanel] = useState<"generate" | "presets" | "settings" | "favorites">("generate");
+  const [activePanel, setActivePanel] = useState<"generate" | "history" | "presets" | "settings" | "favorites">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [presetStore, setPresetStore] = useState<PresetStore>(() => loadPresetStore());
   const [presetSyncReady, setPresetSyncReady] = useState(() => !isTauriRuntime());
@@ -523,6 +583,18 @@ function App() {
 
   const currentImage = activeImages[selectedImage];
   const visibleHistory = history.slice(0, settings.historyDisplayLimit);
+  const styleTemplatesPerPage = 12;
+  const styleTemplatePageCount = Math.max(1, Math.ceil(presetStore.templates.length / styleTemplatesPerPage));
+  const visibleStyleTemplates = presetStore.templates.slice(
+    styleTemplatePage * styleTemplatesPerPage,
+    (styleTemplatePage + 1) * styleTemplatesPerPage,
+  );
+
+  useEffect(() => {
+    setStyleTemplatePage((page) => Math.min(page, styleTemplatePageCount - 1));
+  }, [styleTemplatePageCount]);
+
+  const estimatedCost = useMemo(() => estimateAnlasCost(request, account), [request, account]);
   const canGenerate = useMemo(
     () => {
       const hasRequiredImage =
@@ -626,8 +698,26 @@ function App() {
       return;
     }
     const beforeAccount = beforeAccountResult.summary;
+    const estimateBeforeGeneration = estimateAnlasCost(request, beforeAccount);
+    let stopImageStream: (() => void) | undefined;
     try {
-      const response = await invoke<GenerateImageResponse>("generate_image", { request: buildBackendImageRequest(request, settings) });
+      if (settings.useImageStream) {
+        stopImageStream = await listen<ImageStreamEvent>("image-generation-event", ({ payload }) => {
+          if (payload.kind === "image" && payload.image) {
+            setActiveImages((items) => items.some((item) => item.base64 === payload.image?.base64)
+              ? items
+              : [...items, payload.image as GeneratedImage]);
+            setSelectedImage((index) => index);
+          }
+          if (payload.message && payload.kind !== "complete") {
+            showNotice(payload.kind === "error" ? "error" : "info", payload.message);
+          }
+        });
+      }
+      const response = await invoke<GenerateImageResponse>(
+        settings.useImageStream ? "generate_image_stream" : "generate_image",
+        { request: buildBackendImageRequest(request, settings) },
+      );
       setActiveImages(response.images);
       setSelectedImage(0);
       setHistory((items) =>
@@ -652,8 +742,8 @@ function App() {
       showNotice(
         "success",
         cost === null
-          ? `收到 ${response.images.length} 张图，响应类型 ${response.contentType}。`
-          : `收到 ${response.images.length} 张图，本次消耗 ${formatPoints(cost)} 点。`,
+          ? `收到 ${response.images.length} 张图，预计消耗 ${formatEstimatedCost(estimateBeforeGeneration)}，实际扣费暂未读取。`
+          : `收到 ${response.images.length} 张图，本次消耗 ${formatPoints(cost)} Anlas。`,
       );
     } catch (error) {
       const message = String(error);
@@ -675,6 +765,7 @@ function App() {
           : message,
       );
     } finally {
+      stopImageStream?.();
       setIsGenerating(false);
     }
   }
@@ -703,7 +794,9 @@ function App() {
       const path = await invoke<string>("save_generated_image", {
         fileName: image.fileName,
         base64: image.base64,
+        saveDirectory: settings.saveDirectory.trim() || null,
       });
+      markImageSaved(image, path);
       showNotice("success", `已保存到 ${path}`);
       writeAppLog("success", "save-image", `已保存图片：${path}`);
     } catch (error) {
@@ -711,6 +804,63 @@ function App() {
       showNotice("error", message);
       writeAppLog("error", "save-image", message);
     }
+  }
+
+  function markImageSaved(image: GeneratedImage, path: string) {
+    const updateImage = (candidate: GeneratedImage) =>
+      candidate.base64 === image.base64 ? { ...candidate, savedPath: path } : candidate;
+    setActiveImages((items) => items.map(updateImage));
+    setHistory((items) => items.map((item) => ({ ...item, images: item.images.map(updateImage) })));
+    setFavorites((items) => items.map((item) => (
+      item.image.base64 === image.base64
+        ? { ...item, image: updateImage(item.image) }
+        : item
+    )));
+  }
+
+  async function revealImageInFinder(image: GeneratedImage) {
+    if (!image.savedPath) {
+      showNotice("info", "请先保存图片，保存后才能在 Finder 中显示。");
+      return;
+    }
+
+    if (!isTauriRuntime()) {
+      showNotice("info", "请在 Tauri 桌面窗口中使用 Finder 操作。");
+      return;
+    }
+
+    try {
+      await invoke("reveal_in_finder", { path: image.savedPath });
+    } catch (error) {
+      const message = String(error);
+      showNotice("error", `打开 Finder 失败：${message}`);
+      writeAppLog("error", "reveal-image", message);
+    }
+  }
+
+  async function chooseSaveDirectory() {
+    if (!isTauriRuntime()) {
+      showNotice("info", "请在 Tauri 桌面窗口中选择图片保存目录。");
+      return;
+    }
+
+    try {
+      const directory = await invoke<string | null>("pick_save_directory");
+      if (!directory) {
+        return;
+      }
+      updateSetting("saveDirectory", directory);
+      showNotice("success", `图片保存目录已设置为 ${directory}`);
+    } catch (error) {
+      const message = String(error);
+      showNotice("error", `选择保存目录失败：${message}`);
+      writeAppLog("error", "save-directory", message);
+    }
+  }
+
+  function resetSaveDirectory() {
+    updateSetting("saveDirectory", "");
+    showNotice("info", "已恢复默认图片保存目录。");
   }
 
   async function copyImage(image: GeneratedImage) {
@@ -775,6 +925,9 @@ function App() {
   }
 
   function removeFavorite(id: string) {
+    if (!window.confirm("确定要移除这张收藏图片吗？")) {
+      return;
+    }
     setFavorites((items) => items.filter((item) => item.id !== id));
     showNotice("info", "已移除收藏。");
   }
@@ -819,24 +972,40 @@ function App() {
       showNotice("info", "请在 Tauri 桌面窗口中编码 Vibe。");
       return;
     }
-    if (!request.vibeSourceImage) {
+    const vibeImages = request.vibeSourceImages.length > 0
+      ? request.vibeSourceImages
+      : request.vibeSourceImage
+        ? [request.vibeSourceImage]
+        : [];
+    if (vibeImages.length === 0) {
       showNotice("info", "先选择 Vibe 参考图。");
       return;
     }
 
     setIsEncodingVibe(true);
     try {
-      const encoded = await invoke<string>("encode_vibe", {
-        request: {
-          image: request.vibeSourceImage.base64,
-          model: request.model,
-          informationExtracted: request.referenceInformationExtracted,
-          allowInvalidTls: settings.allowInvalidTls,
-          proxyUrl: activeNovelAiProxyUrl(settings),
-        },
-      });
-      update("referenceImage", encoded);
-      showNotice("success", "Vibe 已编码并写入生成参数。");
+      const encodedImages: string[] = [];
+      for (const [index, image] of vibeImages.entries()) {
+        const encoded = await invoke<string>("encode_vibe", {
+          request: {
+            image: image.base64,
+            model: request.model,
+            informationExtracted: request.referenceInformationExtracted,
+            mask: index === 0 && request.vibeCropToMask ? request.maskImage?.base64 : undefined,
+            cropToMask: index === 0 && request.vibeCropToMask,
+            focusSeed: request.vibeFocusSeed,
+            infoExtractSeed: request.vibeInfoExtractSeed,
+            allowInvalidTls: settings.allowInvalidTls,
+            proxyUrl: activeNovelAiProxyUrl(settings),
+          },
+        });
+        encodedImages.push(encoded);
+      }
+      update("referenceImage", encodedImages[0]);
+      update("referenceImages", encodedImages);
+      update("referenceStrengths", encodedImages.map(() => request.referenceStrength));
+      update("referenceInformationExtractedMultiple", encodedImages.map(() => request.referenceInformationExtracted));
+      showNotice("success", `Vibe 已编码 ${encodedImages.length} 张并写入生成参数。`);
     } catch (error) {
       showNotice("error", String(error));
     } finally {
@@ -923,6 +1092,65 @@ function App() {
     setSelectedImage(Math.min(Math.max(imageIndex, 0), Math.max(item.images.length - 1, 0)));
   }
 
+  function rerunHistoryItem(item: HistoryItem, imageIndex: number) {
+    reuse(item, imageIndex);
+    setActivePanel("generate");
+    showNotice("info", "已加载原参数，可直接重新生成。");
+  }
+
+  async function copyHistoryPrompt(item: HistoryItem) {
+    const prompt = effectivePrompt(item.request);
+    const negativePrompt = item.request.negativePrompt.trim();
+    const text = negativePrompt ? `${prompt}\n\nNegative:\n${negativePrompt}` : prompt;
+    try {
+      await navigator.clipboard.writeText(text);
+      showNotice("success", "Prompt 已复制到剪贴板。");
+    } catch (error) {
+      const message = String(error);
+      showNotice("error", `复制 Prompt 失败：${message}`);
+      writeAppLog("error", "copy-prompt", message);
+    }
+  }
+
+  function randomSeedHistoryItem(item: HistoryItem, imageIndex: number) {
+    const nextRequest = normalizeImageRequest({
+      ...item.request,
+      seed: Math.floor(Math.random() * 4294967296),
+    });
+    setRequest(nextRequest);
+    setActiveImages(item.images);
+    setSelectedImage(imageIndex);
+    setActivePanel("generate");
+    showNotice("info", "已加载参数并随机生成新的 seed。");
+  }
+
+  function sendHistoryToImageMode(item: HistoryItem, imageIndex: number, action: "img2img" | "infill") {
+    const image = item.images[imageIndex];
+    if (!image) {
+      return;
+    }
+
+    const nextRequest = normalizeImageRequest({
+      ...item.request,
+      action,
+      sourceImage: generatedImageToAsset(image),
+      maskImage: undefined,
+      ...(action === "infill"
+        ? {
+            characters: [],
+            useCharacterCoords: false,
+            strength: 1,
+          }
+        : {}),
+    });
+    setRequest(nextRequest);
+    setActiveImages(item.images);
+    setSelectedImage(imageIndex);
+    setMaskEditorOpen(false);
+    setActivePanel("generate");
+    showNotice("info", action === "infill" ? "已送入局部重绘，请绘制遮罩。" : "已送入图生图，可继续调整参数。");
+  }
+
   function update<K extends keyof ImageRequest>(key: K, value: ImageRequest[K]) {
     setRequest((current) => ({ ...current, [key]: value }));
   }
@@ -931,19 +1159,16 @@ function App() {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
-  function applyParameterPreset(preset: SavedPreset) {
-    setRequest((current) => normalizeImageRequest({ ...current, ...preset.payload } as ImageRequest));
+  function applyStylePreset(preset: SavedPreset) {
+    const stylePrompt = typeof preset.payload.stylePrompt === "string"
+      ? preset.payload.stylePrompt
+      : typeof preset.payload.prompt === "string"
+        ? preset.payload.prompt
+        : "";
+    update("stylePrompt", stylePrompt);
+    setStylePromptOpen(true);
     setActivePanel("generate");
-    showNotice("success", `已应用预设“${preset.name}”。`);
-  }
-
-  function applyPromptTemplate(preset: SavedPreset) {
-    const prompt = typeof preset.payload.prompt === "string" ? preset.payload.prompt : "";
-    const negativePrompt = typeof preset.payload.negativePrompt === "string" ? preset.payload.negativePrompt : "";
-    update("prompt", prompt);
-    update("negativePrompt", negativePrompt);
-    setActivePanel("generate");
-    showNotice("success", `已填入提示词模板“${preset.name}”。`);
+    showNotice("success", `已应用画风“${preset.name}”。`);
   }
 
   function addCharacter() {
@@ -976,6 +1201,9 @@ function App() {
   }
 
   function removeCharacter(id: string) {
+    if (!window.confirm("确定要删除这个角色吗？")) {
+      return;
+    }
     update(
       "characters",
       (request.characters ?? []).filter((character) => character.id !== id),
@@ -1068,6 +1296,9 @@ function App() {
   }
 
   function clearHistory() {
+    if (history.length > 0 && !window.confirm("确定要清空全部历史记录吗？此操作无法撤销。")) {
+      return;
+    }
     setHistory([]);
     setActiveImages([]);
     setSelectedImage(0);
@@ -1076,6 +1307,12 @@ function App() {
   }
 
   function removeHistoryItem(itemId: string, imageIndex: number) {
+    const item = history.find((entry) => entry.id === itemId);
+    const image = item?.images[imageIndex];
+    if (!item || !image || !window.confirm(`确定删除“${image.fileName}”吗？`)) {
+      return;
+    }
+
     setHistory((items) => {
       const next = items.map((item) => {
         if (item.id !== itemId) {
@@ -1106,7 +1343,8 @@ function App() {
     const tier = summary.tier ?? "未知";
     const points = formatOptionalPoints(summary.points);
     const active = summary.active === undefined ? "未知" : summary.active ? "有效" : "无效";
-    return `账号状态：Tier ${tier}，点数 ${points}，订阅 ${active}。`;
+    const trial = formatOptionalTrialImages(summary.trialImagesLeft);
+    return `账号状态：Tier ${tier}，Image Anlas ${points}，试用图片 ${trial}，免费生成 ${describeFreeGeneration(summary)}，订阅 ${active}。`;
   }
 
   function hasNovelAiMetadata(imported: ImportedImageMetadata) {
@@ -1206,6 +1444,31 @@ function App() {
     }
   }
 
+  async function handleMultipleAssetInput(
+    event: ChangeEvent<HTMLInputElement>,
+    key: "vibeSourceImages" | "directorReferenceImages",
+  ) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      const nextAssets = await Promise.all(files.map(imageAssetFromFile));
+      const existingAssets = request[key] ?? [];
+      const assets = [...existingAssets, ...nextAssets.filter((asset) => !existingAssets.some((item) => item.base64 === asset.base64))].slice(0, 4);
+      update(key, assets);
+      if (key === "vibeSourceImages") {
+        update("vibeSourceImage", assets[0]);
+      } else {
+        update("directorReferenceImage", assets[0]);
+      }
+    } catch (error) {
+      showNotice("error", `读取图片失败：${String(error)}`);
+    }
+  }
+
   function showNotice(type: Notice["type"], message: string) {
     setNotice({ type, message });
   }
@@ -1244,7 +1507,8 @@ function App() {
         accept="image/*"
         aria-hidden="true"
         className="hidden-file-input"
-        onChange={(event) => void handleAssetInput(event, "vibeSourceImage")}
+        multiple
+        onChange={(event) => void handleMultipleAssetInput(event, "vibeSourceImages")}
         tabIndex={-1}
         type="file"
       />
@@ -1253,7 +1517,8 @@ function App() {
         accept="image/*"
         aria-hidden="true"
         className="hidden-file-input"
-        onChange={(event) => void handleAssetInput(event, "directorReferenceImage")}
+        multiple
+        onChange={(event) => void handleMultipleAssetInput(event, "directorReferenceImages")}
         tabIndex={-1}
         type="file"
       />
@@ -1271,8 +1536,8 @@ function App() {
           <span className="api-status-dot" />
           <span>
             {hasToken
-              ? account
-                ? `API 已连接${account.tier ? ` · ${account.tier}` : ""}${account.points !== undefined ? ` · ${formatPoints(account.points)} 点` : ""}`
+            ? account
+                ? `API 已连接${account.tier ? ` · ${account.tier}` : ""}${account.points !== undefined ? ` · ${formatPoints(account.points)} Anlas` : ""} · ${describeFreeGeneration(account)}`
                 : "API Token 已配置，待验证"
               : "未设置 API Token"}
           </span>
@@ -1298,13 +1563,13 @@ function App() {
           {!sidebarCollapsed ? <span className="nav-label">工作台</span> : null}
         </button>
         <button
-          className={activePanel === "presets" ? "nav-button active" : "nav-button"}
-          onClick={() => setActivePanel("presets")}
-          title="预设"
+          className={activePanel === "history" ? "nav-button active" : "nav-button"}
+          onClick={() => setActivePanel("history")}
+          title="历史画廊"
           type="button"
         >
-          <WandSparkles aria-hidden="true" />
-          {!sidebarCollapsed ? <span className="nav-label">预设</span> : null}
+          <History aria-hidden="true" />
+          {!sidebarCollapsed ? <span className="nav-label">历史画廊</span> : null}
         </button>
         <button
           className={activePanel === "settings" ? "nav-button active" : "nav-button"}
@@ -1499,36 +1764,6 @@ function App() {
           ) : null}
         </section>
 
-        <section className="template-panel" aria-label="参数预设">
-          <div className="template-head">
-            <span>
-              <Frame aria-hidden="true" />
-              预设
-            </span>
-            <button className="template-manage" onClick={() => setActivePanel("presets")} type="button">
-              管理
-            </button>
-          </div>
-          <div className="template-chips">
-            {presetStore.params.slice(0, 12).map((preset) => (
-              <button
-                className="template-chip"
-                key={preset.id}
-                onClick={() => applyParameterPreset(preset)}
-                type="button"
-              >
-                {preset.name}
-              </button>
-            ))}
-            {presetStore.params.length === 0 ? (
-              <div className="preset-inline-empty">
-                <span>暂无参数预设</span>
-                <button onClick={() => setActivePanel("presets")} type="button">去新建</button>
-              </div>
-            ) : null}
-          </div>
-        </section>
-
         {request.action !== "generate" ? (
           <section className="parameter-card mode-input-card">
             <div className="section-head">
@@ -1576,23 +1811,74 @@ function App() {
 
         {stylePromptOpen ? (
           <section className="prompt-card compact">
-            <button className="section-toggle" onClick={() => setStylePromptOpen(false)} type="button" aria-expanded={stylePromptOpen}>
-              <span>
-                <WandSparkles aria-hidden="true" />
-                画风提示词
-              </span>
-              <ChevronDown className="open" aria-hidden="true" />
-            </button>
-            <div className="prompt-actions" style={{ padding: "0 0 8px 0" }}>
-              <TranslateButtons
-                disabled={translatingField !== null || !request.stylePrompt.trim()}
-                enActive={translatingField === "stylePrompt:zh-to-en-tags"}
-                zhActive={translatingField === "stylePrompt:en-to-zh"}
-                onEnglish={() => void translatePromptField("stylePrompt", "zh-to-en-tags")}
-                onChinese={() => void translatePromptField("stylePrompt", "en-to-zh")}
-              />
-              <span>{request.stylePrompt.length}</span>
+            <div className="style-prompt-head">
+              <button className="section-toggle" onClick={() => setStylePromptOpen(false)} type="button" aria-expanded={stylePromptOpen}>
+                <span>
+                  <WandSparkles aria-hidden="true" />
+                  画风提示词
+                </span>
+                <ChevronDown className="open" aria-hidden="true" />
+              </button>
+              <div className="prompt-actions style-prompt-actions">
+                <TranslateButtons
+                  disabled={translatingField !== null || !request.stylePrompt.trim()}
+                  enActive={translatingField === "stylePrompt:zh-to-en-tags"}
+                  zhActive={translatingField === "stylePrompt:en-to-zh"}
+                  onEnglish={() => void translatePromptField("stylePrompt", "zh-to-en-tags")}
+                  onChinese={() => void translatePromptField("stylePrompt", "en-to-zh")}
+                />
+                <span>{request.stylePrompt.length}</span>
+              </div>
             </div>
+            <section className="style-template-panel" aria-label="画风预设">
+              <div className="template-head">
+                <span>
+                  <WandSparkles aria-hidden="true" />
+                  画风
+                </span>
+                <div className="template-pagination" aria-label="画风模板分页">
+                  <button
+                    className="template-page-button"
+                    onClick={() => setStyleTemplatePage((page) => Math.max(0, page - 1))}
+                    disabled={styleTemplatePage === 0}
+                    aria-label="上一页画风模板"
+                    title="上一页"
+                    type="button"
+                  >
+                    <ChevronLeft aria-hidden="true" />
+                  </button>
+                  <span>{styleTemplatePage + 1}/{styleTemplatePageCount}</span>
+                  <button
+                    className="template-page-button"
+                    onClick={() => setStyleTemplatePage((page) => Math.min(styleTemplatePageCount - 1, page + 1))}
+                    disabled={styleTemplatePage >= styleTemplatePageCount - 1}
+                    aria-label="下一页画风模板"
+                    title="下一页"
+                    type="button"
+                  >
+                    <ChevronRight aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+              <div className="template-chips">
+                {visibleStyleTemplates.map((preset) => (
+                  <button
+                    className="template-chip"
+                    key={preset.id}
+                    onClick={() => applyStylePreset(preset)}
+                    type="button"
+                  >
+                    {preset.name}
+                  </button>
+                ))}
+                {presetStore.templates.length === 0 ? (
+                  <div className="preset-inline-empty">
+                    <span>暂无画风预设</span>
+                    <button onClick={() => setActivePanel("presets")} type="button">去新建</button>
+                  </div>
+                ) : null}
+              </div>
+            </section>
             <textarea
               className="prompt-textarea"
               value={request.stylePrompt}
@@ -1681,6 +1967,22 @@ function App() {
             <span>{request.width}×{request.height} · {request.steps} 步</span>
             <span>⌘⏎ 生成</span>
           </div>
+          <div
+            className={estimatedCost && account?.points !== undefined && estimatedCost.total > account.points ? "prompt-cost-summary warning" : "prompt-cost-summary"}
+            title="这是根据当前 NovelAI WebUI 规则计算的估算值，实际扣费以生成后刷新到的账号状态为准。"
+          >
+            <span>
+              预计消耗 <strong>{formatEstimatedCost(estimatedCost)}</strong>
+              {estimatedCost && estimatedCost.freeSamples > 0
+                ? ` · ${formatFreeGenerationReason(estimatedCost.freeReason)} ${estimatedCost.freeSamples} 张`
+                : ""}
+            </span>
+            <span>
+              {account?.points === undefined
+                ? "余额未知"
+                : `余额 ${formatPoints(account.points)} · 生成后约 ${formatPoints(Math.max(account.points - (estimatedCost?.total ?? 0), 0))}`}
+            </span>
+          </div>
           {notice ? (
             <div
               className={`notice prompt-notice ${notice.type}`}
@@ -1695,40 +1997,6 @@ function App() {
       </aside>
 
       <section className="canvas-stage" aria-label="Generated images">
-        <header className="stage-card">
-          <div>
-            <h2>生图工作台</h2>
-            <span>{currentImage ? `${currentImage.fileName} · ${formatBytes(currentImage.byteLen)}` : "等待生成结果"}</span>
-          </div>
-          <div className="toolbar-actions">
-            <button className="ghost-button" onClick={() => importInputRef.current?.click()} type="button">
-              <Upload aria-hidden="true" />
-              从图片导入
-            </button>
-            <button className="ghost-button" onClick={() => refreshAccountStatus()} disabled={isRefreshingAccount || !hasToken} type="button">
-              <RefreshCw className={isRefreshingAccount ? "spin" : ""} aria-hidden="true" />
-              刷新
-            </button>
-            <button className="ghost-button" onClick={() => setRequest(DEFAULT_REQUEST)} type="button">
-              <RotateCcw aria-hidden="true" />
-              重置
-            </button>
-            <button
-              className="ghost-button"
-              onClick={() => {
-                setAdvancedOpen(true);
-                setParameterDrawerOpen(true);
-              }}
-              type="button"
-              aria-expanded={parameterDrawerOpen}
-              aria-controls="generation-parameters"
-            >
-              <Settings2 aria-hidden="true" />
-              高级
-            </button>
-          </div>
-        </header>
-
         <section className="preview-card">
           <div className="preview-head">
             <div>
@@ -1771,6 +2039,20 @@ function App() {
                   </button>
                 </>
               ) : null}
+              <button
+                className={parameterDrawerOpen ? "icon-button filled" : "icon-button"}
+                onClick={() => {
+                  setAdvancedOpen(true);
+                  setParameterDrawerOpen(true);
+                }}
+                type="button"
+                aria-expanded={parameterDrawerOpen}
+                aria-controls="generation-parameters"
+                aria-label="打开高级参数"
+                title="高级参数"
+              >
+                <Settings2 aria-hidden="true" />
+              </button>
             </div>
           </div>
 
@@ -1825,18 +2107,17 @@ function App() {
                         >
                           <img src={`data:${image.mimeType};base64,${image.base64}`} alt="" />
                         </button>
-                        <button
-                          className="history-thumb-delete"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            removeHistoryItem(item.id, imageIndex);
-                          }}
-                          aria-label="删除此记录"
-                          title="删除此记录"
-                          type="button"
-                        >
-                          ×
-                        </button>
+                        <HistoryThumbnailMenu
+                          item={item}
+                          image={image}
+                          imageIndex={imageIndex}
+                          onRerun={rerunHistoryItem}
+                          onSendToImage={sendHistoryToImageMode}
+                          onReveal={revealImageInFinder}
+                          onCopyPrompt={copyHistoryPrompt}
+                          onRandomSeed={randomSeedHistoryItem}
+                          onDelete={() => removeHistoryItem(item.id, imageIndex)}
+                        />
                       </div>
                     )),
                   )}
@@ -1877,7 +2158,9 @@ function App() {
           </div>
           <div className="account-pills" aria-label="Account status">
             <span>Tier：{account?.tier ?? "未知"}</span>
-            <span>点数：{formatOptionalPoints(account?.points)}</span>
+            <span title={describeAnlasBalance(account)}>Anlas：{formatOptionalPoints(account?.points)}</span>
+            <span>免费：{describeFreeGeneration(account)}</span>
+            <span>预计：{formatEstimatedCost(estimatedCost)}</span>
             <span>本次：{lastCost === null ? "未计算" : formatPoints(lastCost)}</span>
           </div>
         </section>
@@ -1922,12 +2205,16 @@ function App() {
 
               <div className="tool-box">
                 <strong>Vibe Transfer</strong>
-                <AssetPicker
-                  asset={request.vibeSourceImage}
-                  label="Vibe 图"
+                <MultiAssetPicker
+                  assets={request.vibeSourceImages.length > 0 ? request.vibeSourceImages : request.vibeSourceImage ? [request.vibeSourceImage] : []}
+                  label="Vibe 参考图（可多选）"
                   onClear={() => {
                     update("vibeSourceImage", undefined);
+                    update("vibeSourceImages", []);
                     update("referenceImage", undefined);
+                    update("referenceImages", []);
+                    update("referenceStrengths", []);
+                    update("referenceInformationExtractedMultiple", []);
                   }}
                   onPick={() => vibeImageInputRef.current?.click()}
                 />
@@ -1935,7 +2222,12 @@ function App() {
                   <NumberField label="强度" value={request.referenceStrength} min={0} max={1} step={0.01} onChange={(value) => update("referenceStrength", clamp01(value))} />
                   <NumberField label="提取量" value={request.referenceInformationExtracted} min={0} max={1} step={0.01} onChange={(value) => update("referenceInformationExtracted", clamp01(value))} />
                 </div>
-                <button className="ghost-button wide-button" onClick={() => void encodeVibeTransfer()} disabled={isEncodingVibe || !hasToken || !request.vibeSourceImage} type="button">
+                <Toggle label="按当前遮罩裁剪" checked={request.vibeCropToMask} disabled={!request.maskImage} onChange={(value) => update("vibeCropToMask", value)} />
+                <div className="field-grid">
+                  <OptionalNumberField label="Focus Seed" value={request.vibeFocusSeed} min={0} max={4294967295} onChange={(value) => update("vibeFocusSeed", value)} />
+                  <OptionalNumberField label="提取 Seed" value={request.vibeInfoExtractSeed} min={0} max={4294967295} onChange={(value) => update("vibeInfoExtractSeed", value)} />
+                </div>
+                <button className="ghost-button wide-button" onClick={() => void encodeVibeTransfer()} disabled={isEncodingVibe || !hasToken || (request.vibeSourceImages.length === 0 && !request.vibeSourceImage)} type="button">
                   {isEncodingVibe ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
                   编码 Vibe
                 </button>
@@ -1969,10 +2261,13 @@ function App() {
 
               <div className="tool-box">
                 <strong>Director Tools</strong>
-                <AssetPicker
-                  asset={request.directorReferenceImage}
-                  label="输入图"
-                  onClear={() => update("directorReferenceImage", undefined)}
+                <MultiAssetPicker
+                  assets={request.directorReferenceImages.length > 0 ? request.directorReferenceImages : request.directorReferenceImage ? [request.directorReferenceImage] : []}
+                  label="输入图 / CR 参考图（可多选）"
+                  onClear={() => {
+                    update("directorReferenceImage", undefined);
+                    update("directorReferenceImages", []);
+                  }}
                   onPick={() => directorImageInputRef.current?.click()}
                 />
                 <label className="field">
@@ -1986,6 +2281,13 @@ function App() {
                   </select>
                 </label>
                 <label className="field">
+                  <span>CR 参考模式</span>
+                  <select value={request.directorReferenceMode} onChange={(event) => update("directorReferenceMode", event.target.value as ImageRequest["directorReferenceMode"])}>
+                    <option value="character">character · 角色</option>
+                    <option value="character&style">character&style · 角色 + 画风</option>
+                  </select>
+                </label>
+                <label className="field">
                   <span>工具 Prompt</span>
                   <input value={request.directorReferencePrompt} onChange={(event) => update("directorReferencePrompt", event.target.value)} placeholder="留空则使用主 Prompt" />
                 </label>
@@ -1993,6 +2295,27 @@ function App() {
                   {isToolRunning ? <Loader2 className="spin" aria-hidden="true" /> : <Sparkles aria-hidden="true" />}
                   执行工具
                 </button>
+              </div>
+
+              <div className="tool-box">
+                <strong>ControlNet</strong>
+                <span className="tool-helper">填写官方 ControlNet 条件数据后，生成时会一并提交。</span>
+                <label className="field">
+                  <span>条件数据</span>
+                  <textarea
+                    value={request.controlnetCondition}
+                    onChange={(event) => update("controlnetCondition", event.target.value)}
+                    placeholder="粘贴 ControlNet condition / base64"
+                    rows={3}
+                  />
+                </label>
+                <div className="field-grid">
+                  <label className="field">
+                    <span>模型</span>
+                    <input value={request.controlnetModel} onChange={(event) => update("controlnetModel", event.target.value)} placeholder="可选" />
+                  </label>
+                  <NumberField label="强度" value={request.controlnetStrength} min={0} max={1} step={0.01} onChange={(value) => update("controlnetStrength", clamp01(value))} />
+                </div>
               </div>
             </div>
           ) : null}
@@ -2175,6 +2498,15 @@ function App() {
                 <NumberField label="CFG 重缩放" value={request.cfgRescale} min={0} max={1} step={0.01} onChange={(value) => update("cfgRescale", value)} />
                 <NumberField label="采样数" value={request.nSamples} min={1} max={8} onChange={(value) => update("nSamples", value)} />
                 <OptionalNumberField label="Skip Sigma" value={request.skipCfgAboveSigma} min={0} max={100} step={0.1} onChange={(value) => update("skipCfgAboveSigma", value)} />
+                <OptionalNumberField label="Tag Hint QT" value={request.tagHintQt} min={0} max={100} onChange={(value) => update("tagHintQt", value)} />
+                <label className="field">
+                  <span>生成时 Upscale 模糊参考</span>
+                  <select value={request.upscaleBlurSigma ?? ""} onChange={(event) => update("upscaleBlurSigma", event.target.value === "" ? undefined : Number(event.target.value))}>
+                    <option value="">关闭</option>
+                    <option value="0">0</option>
+                    {UPSCALE_BLUR_SIGMAS.map((sigma) => <option key={sigma} value={sigma}>{sigma.toFixed(2)}</option>)}
+                  </select>
+                </label>
               </div>
 
               <div className="toggle-grid">
@@ -2184,6 +2516,9 @@ function App() {
                 <Toggle label="动态阈值" checked={request.dynamicThresholding} onChange={(value) => update("dynamicThresholding", value)} />
                 <Toggle label="Euler Bug" checked={request.deliberateEulerAncestralBug} onChange={(value) => update("deliberateEulerAncestralBug", value)} />
                 <Toggle label="布朗运动" checked={request.preferBrownian} onChange={(value) => update("preferBrownian", value)} />
+                <Toggle label="保留原图" checked={request.addOriginalImage} onChange={(value) => update("addOriginalImage", value)} />
+                <Toggle label="V3 Extend" checked={request.legacyV3Extend} onChange={(value) => update("legacyV3Extend", value)} />
+                <Toggle label="Upscale Enhance" checked={request.upscaledEnhance} onChange={(value) => update("upscaledEnhance", value)} />
               </div>
             </div>
           ) : null}
@@ -2203,15 +2538,31 @@ function App() {
       ) : null}
         </div>
         </div>
+      ) : activePanel === "history" ? (
+        <HistoryGalleryPage
+          history={history}
+          isFavorited={isImageFavorited}
+          onOpen={(item, imageIndex) => {
+            reuse(item, imageIndex);
+            setActivePanel("generate");
+            showNotice("info", "已打开历史图片。");
+          }}
+          onCopy={copyImage}
+          onSave={saveImage}
+          onToggleFavorite={toggleFavorite}
+          onRemove={removeHistoryItem}
+          onRerun={rerunHistoryItem}
+          onSendToImage={sendHistoryToImageMode}
+          onClear={clearHistory}
+          onStartGenerating={() => setActivePanel("generate")}
+        />
       ) : activePanel === "presets" ? (
         <PresetsPage
           store={presetStore}
-          currentParams={snapshotPresetParams(request as unknown as Record<string, unknown>)}
-          currentPrompt={request.prompt}
+          currentStylePrompt={request.stylePrompt}
           currentNegativePrompt={request.negativePrompt}
           onChange={setPresetStore}
-          onApplyParams={applyParameterPreset}
-          onApplyTemplate={applyPromptTemplate}
+          onApplyStyle={applyStylePreset}
         />
       ) : activePanel === "favorites" ? (
         <section className="favorites-page" aria-label="Favorite gallery">
@@ -2302,13 +2653,27 @@ function App() {
                 <ShieldCheck aria-hidden="true" />
                 <h2>账号状态</h2>
               </div>
-              <div className="account-grid">
-                <span>Tier<strong>{account?.tier ?? "未知"}</strong></span>
-                <span>点数<strong>{formatOptionalPoints(account?.points)}</strong></span>
-                <span>订阅<strong>{account?.active === undefined ? "未知" : account.active ? "有效" : "无效"}</strong></span>
-                <span>本次消耗<strong>{lastCost === null ? "未计算" : formatPoints(lastCost)}</strong></span>
-              </div>
-              <button className="ghost-button wide-button" onClick={() => refreshAccountStatus()} disabled={isRefreshingAccount || !hasToken} type="button">
+          <div className="account-grid">
+            <span>Tier<strong>{account?.tier ?? "未知"}</strong></span>
+            <span title={describeAnlasBalance(account)}>Image Anlas<strong>{formatOptionalPoints(account?.points)}</strong></span>
+            <span>试用图片<strong>{formatOptionalTrialImages(account?.trialImagesLeft)}</strong></span>
+            <span>生成权益<strong>{describeFreeGeneration(account)}</strong></span>
+            <span>订阅状态<strong>{account?.active === undefined ? "未知" : account.active ? "有效" : "无效"}</strong></span>
+            <span title="根据当前生成参数和账户等级实时估算">
+              预计本次<strong>{formatEstimatedCost(estimatedCost)}</strong>
+            </span>
+            <span>本次消耗<strong>{lastCost === null ? "未计算" : `${formatPoints(lastCost)} Anlas`}</strong></span>
+          </div>
+          {account?.points !== undefined && (account.subscriptionPoints !== undefined || account.purchasedPoints !== undefined) ? (
+            <p className="account-balance-note">
+              固定池 {account.subscriptionPoints === undefined ? "未知" : `${formatPoints(account.subscriptionPoints)} Anlas`}
+              <span aria-hidden="true"> + </span>
+              购买池 {account.purchasedPoints === undefined ? "未知" : `${formatPoints(account.purchasedPoints)} Anlas`}
+              <span aria-hidden="true"> = </span>
+              总计 {formatPoints(account.points)} Anlas
+            </p>
+          ) : null}
+          <button className="ghost-button wide-button" onClick={() => refreshAccountStatus()} disabled={isRefreshingAccount || !hasToken} type="button">
                 <RefreshCw className={isRefreshingAccount ? "spin" : ""} aria-hidden="true" />
                 刷新账号状态
               </button>
@@ -2334,6 +2699,11 @@ function App() {
                   label="允许不安全 TLS"
                   checked={settings.allowInvalidTls}
                   onChange={(value) => updateSetting("allowInvalidTls", value)}
+                />
+                <Toggle
+                  label="流式图像生成（实时进度）"
+                  checked={settings.useImageStream}
+                  onChange={(value) => updateSetting("useImageStream", value)}
                 />
                 <Toggle
                   label="使用 NovelAI 代理"
@@ -2374,6 +2744,31 @@ function App() {
                 </label>
                 <NumberField label="UC 预设" value={request.ucPreset} min={0} max={5} onChange={(value) => update("ucPreset", value)} />
                 <NumberField label="参数版本" value={request.paramsVersion} min={1} max={4} onChange={(value) => update("paramsVersion", value)} />
+              </div>
+            </section>
+
+            <section className="settings-panel wide save-directory-panel">
+              <div className="section-head">
+                <FolderOpen aria-hidden="true" />
+                <h2>图片保存位置</h2>
+              </div>
+              <p className="settings-copy">点击“保存图片”时使用此目录；留空则保存到系统图片目录下的 NovelAI GUI 文件夹。</p>
+              <div className="save-directory-row">
+                <input
+                  value={settings.saveDirectory}
+                  placeholder="默认：图片 / NovelAI GUI"
+                  readOnly
+                  aria-label="图片保存目录"
+                />
+                <button className="ghost-button" onClick={() => void chooseSaveDirectory()} type="button">
+                  <FolderOpen aria-hidden="true" />
+                  选择目录
+                </button>
+                {settings.saveDirectory ? (
+                  <button className="icon-button" onClick={resetSaveDirectory} aria-label="恢复默认保存目录" title="恢复默认保存目录" type="button">
+                    <Eraser aria-hidden="true" />
+                  </button>
+                ) : null}
               </div>
             </section>
 
@@ -2443,7 +2838,277 @@ function App() {
           }}
         />
       ) : null}
-    </main>
+  </main>
+);
+}
+
+function HistoryGalleryPage(props: {
+  history: HistoryItem[];
+  isFavorited: (image?: GeneratedImage) => boolean;
+  onOpen: (item: HistoryItem, imageIndex: number) => void;
+  onCopy: (image: GeneratedImage) => void | Promise<void>;
+  onSave: (image: GeneratedImage) => void | Promise<void>;
+  onToggleFavorite: (image: GeneratedImage) => void;
+  onRemove: (itemId: string, imageIndex: number) => void;
+  onRerun: (item: HistoryItem, imageIndex: number) => void;
+  onSendToImage: (item: HistoryItem, imageIndex: number, action: "img2img" | "infill") => void;
+  onClear: () => void;
+  onStartGenerating: () => void;
+}) {
+  const imageCount = props.history.reduce((count, item) => count + item.images.length, 0);
+
+  return (
+    <section className="favorites-page history-gallery-page" aria-label="History gallery">
+      <header className="settings-header gallery-header">
+        <div>
+          <p className="eyebrow">Gallery</p>
+          <h2>历史画廊</h2>
+          <span>集中查看所有生成结果，点击图片可回到生图工作台。</span>
+        </div>
+        {props.history.length > 0 ? (
+          <button className="ghost-button" onClick={props.onClear} type="button">
+            <Eraser aria-hidden="true" />
+            清空历史
+          </button>
+        ) : null}
+      </header>
+
+      <section className="settings-panel favorites-panel history-gallery-panel">
+        <div className="section-head">
+          <History aria-hidden="true" />
+          <h2>全部生成</h2>
+          <span className="section-meta">{imageCount} 张 · {props.history.length} 次</span>
+        </div>
+
+        {imageCount === 0 ? (
+          <div className="mini-empty favorites-empty">
+            <History aria-hidden="true" />
+            <strong>暂无历史图片</strong>
+            <span>生成后的图片会自动保存在这里。</span>
+            <button className="run-button" onClick={props.onStartGenerating} type="button">
+              <Images aria-hidden="true" />
+              开始生成
+            </button>
+          </div>
+        ) : (
+          <div className="favorites-grid history-gallery-grid">
+            {props.history.flatMap((item) =>
+              item.images.map((image, imageIndex) => {
+                const prompt = item.request.prompt || item.request.stylePrompt || "未命名提示词";
+                const model = item.request.model || "未知模型";
+                const size = item.request.width && item.request.height
+                  ? `${item.request.width} × ${item.request.height}`
+                  : "尺寸未知";
+                const favorited = props.isFavorited(image);
+
+                return (
+                  <article className="favorite-card history-gallery-card" key={`${item.id}-${image.fileName}-${imageIndex}`}>
+                    <button
+                      className="favorite-image history-gallery-image"
+                      onClick={() => props.onOpen(item, imageIndex)}
+                      aria-label={`打开历史图片：${prompt}`}
+                      type="button"
+                    >
+                      <img src={`data:${image.mimeType};base64,${image.base64}`} alt={prompt} loading="lazy" />
+                    </button>
+                    <div className="favorite-info history-gallery-info">
+                      <strong title={prompt}>{prompt}</strong>
+                      <span>{new Date(item.createdAt).toLocaleString()}</span>
+                      <small>{model} · {size}{item.images.length > 1 ? ` · ${item.images.length} 张` : ""}</small>
+                    </div>
+                    <div className="history-action-row">
+                      <button
+                        className="history-action-button"
+                        onClick={() => props.onRerun(item, imageIndex)}
+                        aria-label="用此参数重跑"
+                        title="用此参数重跑"
+                        type="button"
+                      >
+                        <RefreshCw aria-hidden="true" />
+                        <span>重跑</span>
+                      </button>
+                      <button
+                        className="history-action-button"
+                        onClick={() => props.onSendToImage(item, imageIndex, "img2img")}
+                        aria-label="送入图生图"
+                        title="送入图生图"
+                        type="button"
+                      >
+                        <ImagePlus aria-hidden="true" />
+                        <span>图生图</span>
+                      </button>
+                      <button
+                        className="history-action-button"
+                        onClick={() => props.onSendToImage(item, imageIndex, "infill")}
+                        aria-label="送入局部重绘"
+                        title="送入局部重绘"
+                        type="button"
+                      >
+                        <WandSparkles aria-hidden="true" />
+                        <span>局部重绘</span>
+                      </button>
+                    </div>
+                    <div className="favorite-actions history-gallery-actions">
+                      <button className="icon-button" onClick={() => props.onCopy(image)} aria-label="复制图片" title="复制图片" type="button">
+                        <Copy aria-hidden="true" />
+                      </button>
+                      <button className="icon-button" onClick={() => props.onSave(image)} aria-label="保存图片" title="保存图片" type="button">
+                        <Download aria-hidden="true" />
+                      </button>
+                      <button
+                        className={favorited ? "icon-button favorite-action active" : "icon-button favorite-action"}
+                        onClick={() => props.onToggleFavorite(image)}
+                        aria-label={favorited ? "取消收藏" : "加入收藏"}
+                        title={favorited ? "取消收藏" : "加入收藏"}
+                        type="button"
+                      >
+                        <Heart aria-hidden="true" />
+                      </button>
+                      <button
+                        className="icon-button"
+                        onClick={() => props.onRemove(item.id, imageIndex)}
+                        aria-label="删除历史图片"
+                        title="删除历史图片"
+                        type="button"
+                      >
+                        <Eraser aria-hidden="true" />
+                      </button>
+                    </div>
+                  </article>
+                );
+              }),
+            )}
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function HistoryThumbnailMenu(props: {
+  item: HistoryItem;
+  image: GeneratedImage;
+  imageIndex: number;
+  onRerun: (item: HistoryItem, imageIndex: number) => void;
+  onSendToImage: (item: HistoryItem, imageIndex: number, action: "img2img" | "infill") => void;
+  onReveal: (image: GeneratedImage) => void | Promise<void>;
+  onCopyPrompt: (item: HistoryItem) => void | Promise<void>;
+  onRandomSeed: (item: HistoryItem, imageIndex: number) => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const updatePosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) {
+        return;
+      }
+      const rect = trigger.getBoundingClientRect();
+      const menuWidth = 186;
+      const menuHeight = 286;
+      const top = rect.top > menuHeight + 12 ? rect.top - menuHeight - 8 : rect.bottom + 8;
+      const left = Math.min(window.innerWidth - menuWidth - 8, Math.max(8, rect.right - menuWidth));
+      setPosition({ top, left });
+    };
+
+    const closeOnOutsideClick = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof Node) || triggerRef.current?.contains(target) || menuRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("pointerdown", closeOnOutsideClick);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("pointerdown", closeOnOutsideClick);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function run(action: () => void | Promise<void>) {
+    setOpen(false);
+    void action();
+  }
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        className="history-thumb-menu-trigger"
+        data-open={open ? "true" : undefined}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((current) => !current);
+        }}
+        aria-expanded={open}
+        aria-label="打开历史图片菜单"
+        title="更多操作"
+        type="button"
+      >
+        <MoreHorizontal aria-hidden="true" />
+      </button>
+      {open && position
+        ? createPortal(
+            <div
+              ref={menuRef}
+              className="history-thumb-menu"
+              style={{ top: position.top, left: position.left }}
+              role="menu"
+            >
+              <button onClick={() => run(() => props.onRerun(props.item, props.imageIndex))} role="menuitem" type="button">
+                <RefreshCw aria-hidden="true" />
+                用此参数重跑
+              </button>
+              <button onClick={() => run(() => props.onSendToImage(props.item, props.imageIndex, "img2img"))} role="menuitem" type="button">
+                <ImagePlus aria-hidden="true" />
+                送入图生图
+              </button>
+              <button onClick={() => run(() => props.onSendToImage(props.item, props.imageIndex, "infill"))} role="menuitem" type="button">
+                <WandSparkles aria-hidden="true" />
+                送入局部重绘
+              </button>
+              <button onClick={() => run(() => props.onReveal(props.image))} role="menuitem" type="button">
+                <FolderOpen aria-hidden="true" />
+                在 Finder 中显示
+              </button>
+              <button onClick={() => run(() => props.onCopyPrompt(props.item))} role="menuitem" type="button">
+                <Copy aria-hidden="true" />
+                复制 prompt
+              </button>
+              <button onClick={() => run(() => props.onRandomSeed(props.item, props.imageIndex))} role="menuitem" type="button">
+                <RefreshCw aria-hidden="true" />
+                复制并随机 seed
+              </button>
+              <div className="history-thumb-menu-separator" role="separator" />
+              <button className="danger" onClick={() => run(props.onDelete)} role="menuitem" type="button">
+                <Eraser aria-hidden="true" />
+                删除记录
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }
 
@@ -2573,6 +3238,35 @@ function AssetPicker(props: {
           {props.pickLabel ?? "选择"}
         </button>
       )}
+    </div>
+  );
+}
+
+function MultiAssetPicker(props: {
+  label: string;
+  assets: ImageAsset[];
+  onPick: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="asset-picker multi-asset-picker">
+      <div className="multi-asset-thumbs">
+        {props.assets.length > 0 ? props.assets.map((asset) => (
+          <img key={`${asset.name}-${asset.base64.slice(0, 12)}`} src={`data:${asset.mimeType};base64,${asset.base64}`} alt={asset.name} />
+        )) : <ImagePlus aria-hidden="true" />}
+      </div>
+      <div>
+        <span>{props.label}</span>
+        <strong>{props.assets.length > 0 ? `${props.assets.length} 张已选择` : "未选择"}</strong>
+      </div>
+      <button className="ghost-button" onClick={props.onPick} type="button">
+        {props.assets.length > 0 ? "追加" : "选择"}
+      </button>
+      {props.assets.length > 0 ? (
+        <button className="icon-button" onClick={props.onClear} title="清除图片" type="button">
+          <Eraser aria-hidden="true" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -3058,12 +3752,14 @@ function loadSettings(): AppSettings {
         parsed.novelAiProxyUrl?.trim() === LEGACY_DEFAULT_NOVELAI_PROXY_URL
           ? ""
           : parsed.novelAiProxyUrl ?? DEFAULT_SETTINGS.novelAiProxyUrl,
+      saveDirectory: parsed.saveDirectory ?? DEFAULT_SETTINGS.saveDirectory,
       historyDisplayLimit: clampHistoryLimit(
         parsed.historyDisplayLimit ?? DEFAULT_SETTINGS.historyDisplayLimit,
       ),
       translationBaseUrl: parsed.translationBaseUrl ?? DEFAULT_SETTINGS.translationBaseUrl,
       translationApiKey: parsed.translationApiKey ?? DEFAULT_SETTINGS.translationApiKey,
       translationModel: parsed.translationModel ?? DEFAULT_SETTINGS.translationModel,
+      useImageStream: parsed.useImageStream ?? DEFAULT_SETTINGS.useImageStream,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -3289,6 +3985,7 @@ function buildPayloadPreview(request: ImageRequest) {
     seed: request.seed,
     image_format: request.imageFormat,
     qualityToggle: request.qualityToggle,
+    tag_hint_uc_preset: request.ucPreset,
     tag_hint_transparent_background: request.transparentBackground,
     straight_alpha: request.transparentBackground,
     ucPreset: request.ucPreset,
@@ -3299,7 +3996,15 @@ function buildPayloadPreview(request: ImageRequest) {
     skip_cfg_above_sigma: request.skipCfgAboveSigma,
     deliberate_euler_ancestral_bug: request.deliberateEulerAncestralBug,
     prefer_brownian: request.preferBrownian,
+    add_original_image: request.addOriginalImage,
+    legacy_v3_extend: request.legacyV3Extend,
+    tag_hint_qt: request.tagHintQt,
+    upscaled_enhance: request.upscaledEnhance,
   };
+
+  if (request.upscaleBlurSigma !== undefined) {
+    parameters.upscale = { declared_blur_sigma: request.upscaleBlurSigma };
+  }
 
   if (request.action === "img2img" || request.action === "infill") {
     parameters.image = request.sourceImage ? `[${request.sourceImage.name}]` : undefined;
@@ -3311,17 +4016,43 @@ function buildPayloadPreview(request: ImageRequest) {
   if (request.action === "infill") {
     parameters.mask = request.maskImage ? `[${request.maskImage.name}]` : undefined;
   }
-  if (request.referenceImage) {
+  const referenceCount = request.referenceImages.length || (request.referenceImage ? 1 : 0);
+  if (referenceCount > 1) {
+    parameters.reference_image_multiple = request.referenceImages.map(() => "[encoded vibe]");
+    parameters.reference_strength_multiple = request.referenceStrengths.length === referenceCount
+      ? request.referenceStrengths
+      : request.referenceImages.map(() => request.referenceStrength);
+    parameters.reference_information_extracted_multiple = request.referenceInformationExtractedMultiple.length === referenceCount
+      ? request.referenceInformationExtractedMultiple
+      : request.referenceImages.map(() => request.referenceInformationExtracted);
+  } else if (request.referenceImage) {
     parameters.reference_image = "[encoded vibe]";
     parameters.reference_strength = request.referenceStrength;
     parameters.reference_information_extracted = request.referenceInformationExtracted;
   }
-  if (request.directorReferenceImage) {
-    parameters.director_reference_images = [`[${request.directorReferenceImage.name}]`];
-    parameters.director_reference_descriptions = [request.directorReferencePrompt || effectivePrompt(request)];
-    parameters.director_reference_strength_values = [request.directorReferenceStrength];
-    parameters.director_reference_secondary_strength_values = [request.directorReferenceSecondaryStrength];
-    parameters.director_reference_information_extracted = [request.directorReferenceInformationExtracted];
+  const directorImages = request.directorReferenceImages.length > 0
+    ? request.directorReferenceImages
+    : request.directorReferenceImage
+      ? [request.directorReferenceImage]
+      : [];
+  if (directorImages.length > 0) {
+    parameters.director_reference_images = directorImages.map((image) => `[${image.name}]`);
+    parameters.director_reference_descriptions = directorImages.map(() => ({
+      caption: {
+        base_caption: request.directorReferenceMode,
+        char_captions: request.directorReferencePrompt ? [{ char_caption: request.directorReferencePrompt, centers: [{ x: 0.5, y: 0.5 }] }] : [],
+      },
+      use_coords: false,
+      use_order: true,
+    }));
+    parameters.director_reference_strength_values = directorImages.map(() => request.directorReferenceStrength);
+    parameters.director_reference_secondary_strength_values = directorImages.map(() => request.directorReferenceSecondaryStrength);
+    parameters.director_reference_information_extracted = directorImages.map(() => request.directorReferenceInformationExtracted);
+  }
+  if (request.controlnetCondition.trim()) {
+    parameters.controlnet_condition = request.controlnetCondition;
+    parameters.controlnet_model = request.controlnetModel || undefined;
+    parameters.controlnet_strength = request.controlnetStrength;
   }
 
   if (isModernImageModel(request.model)) {
@@ -3329,7 +4060,7 @@ function buildPayloadPreview(request: ImageRequest) {
     const useCoords = request.useCharacterCoords && characterCaptions.length > 0;
     parameters.legacy = false;
     parameters.legacy_uc = false;
-    parameters.add_original_image = false;
+    parameters.add_original_image = request.addOriginalImage;
     parameters.autoSmea = false;
     parameters.use_coords = useCoords;
     parameters.v4_prompt = {
@@ -3374,7 +4105,11 @@ function buildBackendImageRequest(request: ImageRequest, settings: AppSettings) 
     maskImage: request.maskImage?.base64,
     vibeSourceImage: undefined,
     referenceImage: request.referenceImage,
+    referenceImages: request.referenceImages,
+    referenceStrengths: request.referenceImages.map(() => request.referenceStrength),
+    referenceInformationExtractedMultiple: request.referenceImages.map(() => request.referenceInformationExtracted),
     directorReferenceImage: request.directorReferenceImage?.base64,
+    directorReferenceImages: request.directorReferenceImages.map((image) => image.base64),
   };
 }
 
@@ -3443,12 +4178,25 @@ function normalizeImageRequest(request: ImageRequest): ImageRequest {
     strength: clamp01(request.strength ?? DEFAULT_REQUEST.strength),
     noise: clamp01(request.noise ?? DEFAULT_REQUEST.noise),
     colorCorrect: request.colorCorrect ?? DEFAULT_REQUEST.colorCorrect,
+    vibeSourceImages: request.vibeSourceImages ?? (request.vibeSourceImage ? [request.vibeSourceImage] : []),
+    addOriginalImage: request.addOriginalImage ?? DEFAULT_REQUEST.addOriginalImage,
+    legacyV3Extend: request.legacyV3Extend ?? DEFAULT_REQUEST.legacyV3Extend,
+    upscaledEnhance: request.upscaledEnhance ?? DEFAULT_REQUEST.upscaledEnhance,
+    referenceImages: request.referenceImages ?? (request.referenceImage ? [request.referenceImage] : []),
+    referenceStrengths: request.referenceStrengths ?? (request.referenceImage ? [request.referenceStrength] : []),
+    referenceInformationExtractedMultiple: request.referenceInformationExtractedMultiple ?? (request.referenceImage ? [request.referenceInformationExtracted] : []),
     referenceStrength: clamp01(request.referenceStrength ?? DEFAULT_REQUEST.referenceStrength),
     referenceInformationExtracted: clamp01(request.referenceInformationExtracted ?? DEFAULT_REQUEST.referenceInformationExtracted),
+    directorReferenceImages: request.directorReferenceImages ?? (request.directorReferenceImage ? [request.directorReferenceImage] : []),
+    directorReferenceMode: request.directorReferenceMode === "character&style" ? "character&style" : DEFAULT_REQUEST.directorReferenceMode,
     directorReferencePrompt: request.directorReferencePrompt ?? "",
     directorReferenceStrength: clamp01(request.directorReferenceStrength ?? DEFAULT_REQUEST.directorReferenceStrength),
     directorReferenceSecondaryStrength: clamp01(request.directorReferenceSecondaryStrength ?? DEFAULT_REQUEST.directorReferenceSecondaryStrength),
     directorReferenceInformationExtracted: clamp01(request.directorReferenceInformationExtracted ?? DEFAULT_REQUEST.directorReferenceInformationExtracted),
+    controlnetCondition: request.controlnetCondition ?? DEFAULT_REQUEST.controlnetCondition,
+    controlnetModel: request.controlnetModel ?? DEFAULT_REQUEST.controlnetModel,
+    controlnetStrength: clamp01(request.controlnetStrength ?? DEFAULT_REQUEST.controlnetStrength),
+    vibeCropToMask: request.vibeCropToMask ?? DEFAULT_REQUEST.vibeCropToMask,
   };
 }
 
@@ -3480,27 +4228,98 @@ function clamp01(value: number) {
 }
 
 function summarizeAccount(raw: unknown): AccountSummary {
+  const anlas = extractAnlasBalance(raw);
+  const trial = extractTrialImages(raw);
   return {
     tier: normalizeTier(findStringByKeys(raw, ["tier", "subscriptionTier", "plan", "accountTier", "accountType"])),
-    points: extractAnlasPoints(raw),
+    points: anlas?.total,
+    subscriptionPoints: anlas?.subscription,
+    purchasedPoints: anlas?.purchased,
+    trialImagesLeft: trial?.imagesLeft,
+    trialActivated: trial?.activated,
     active: findBooleanByKeys(raw, ["active", "subscriptionActive", "isActive"]),
     expiresAt: findNumberByKeys(raw, ["expiresAt", "expires_at", "expirationTime"]),
     raw,
   };
 }
 
-function extractAnlasPoints(raw: unknown) {
-  const direct = findNumberByKeys(raw, ["trainingStepsLeft", "anlas", "anlasBalance", "points"]);
-  if (direct !== undefined) {
-    return direct;
+function extractTrialImages(raw: unknown) {
+  // The current API exposes Paper trial state under account information.
+  const sources = [
+    isRecord(raw) ? raw.information : undefined,
+    isRecord(raw) && isRecord(raw.data) ? raw.data.information : undefined,
+  ];
+  for (const source of sources) {
+    if (!isRecord(source)) {
+      continue;
+    }
+    const imagesLeft = readDirectNumber(source.trialImagesLeft);
+    const activated = typeof source.trialActivated === "boolean" ? source.trialActivated : undefined;
+    if (imagesLeft !== undefined || activated !== undefined) {
+      return { imagesLeft, activated };
+    }
   }
 
-  const fixed = findNumberByKeys(raw, ["fixedTrainingStepsLeft", "fixedAnlas"]);
-  const purchased = findNumberByKeys(raw, ["purchasedTrainingSteps", "purchasedAnlas"]);
-  if (fixed !== undefined || purchased !== undefined) {
-    return (fixed ?? 0) + (purchased ?? 0);
+  const imagesLeft = findNumberByKeys(raw, ["trialImagesLeft"]);
+  const activated = findBooleanByKeys(raw, ["trialActivated"]);
+  return imagesLeft === undefined && activated === undefined ? undefined : { imagesLeft, activated };
+}
+
+function extractAnlasBalance(raw: unknown) {
+  // Current NovelAI responses expose the balance as:
+  // subscription.trainingStepsLeft.{fixedTrainingStepsLeft,purchasedTrainingSteps}
+  // Prefer this exact path so unrelated `points` fields cannot be mistaken for Anlas.
+  const sources = [
+    isRecord(raw) ? raw.subscription : undefined,
+    isRecord(raw) && isRecord(raw.data) ? raw.data.subscription : undefined,
+  ];
+  for (const source of sources) {
+    const balance = readTrainingStepsBalance(source);
+    if (balance) {
+      return balance;
+    }
   }
 
+  // Compatibility fallback for older proxy responses that returned the
+  // trainingStepsLeft object at the root.
+  const legacy = readTrainingStepsBalance(raw);
+  if (legacy) {
+    return legacy;
+  }
+
+  const direct = findNumberByKeys(raw, ["anlas", "anlasBalance", "imageAnlas"]);
+  return direct === undefined
+    ? undefined
+    : { total: direct, subscription: undefined, purchased: undefined };
+}
+
+function readTrainingStepsBalance(value: unknown) {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const trainingSteps = isRecord(value.trainingStepsLeft) ? value.trainingStepsLeft : value;
+  const subscription = readDirectNumber(trainingSteps.fixedTrainingStepsLeft);
+  const purchased = readDirectNumber(trainingSteps.purchasedTrainingSteps);
+  if (subscription === undefined && purchased === undefined) {
+    return undefined;
+  }
+
+  return {
+    total: (subscription ?? 0) + (purchased ?? 0),
+    subscription,
+    purchased,
+  };
+}
+
+function readDirectNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
   return undefined;
 }
 
@@ -3522,6 +4341,88 @@ function isTokenNotConfiguredError(error: unknown) {
   return String(error).includes(TOKEN_NOT_CONFIGURED_ERROR);
 }
 
+function estimateAnlasCost(request: ImageRequest, account: AccountSummary | null): AnlasEstimate | null {
+  if (!isAnlasEstimateSupportedModel(request.model)) {
+    return null;
+  }
+
+  const width = Number(request.width);
+  const height = Number(request.height);
+  const steps = Number(request.steps);
+  const samples = Math.max(1, Math.floor(Number(request.nSamples)));
+  if (![width, height, steps].every(Number.isFinite) || width <= 0 || height <= 0 || steps <= 0) {
+    return null;
+  }
+
+  const area = width * height;
+  const baseCost = Math.ceil(
+    2.951823174884865e-6 * area + 5.753298233447344e-7 * area * steps,
+  );
+  const smeaMultiplier = request.sm ? (request.smDyn ? 1.4 : 1.2) : 1;
+  const strengthFactor =
+    request.action === "infill" && request.maskImage
+      ? 1
+      : request.action === "img2img" && request.sourceImage
+        ? clamp01(request.strength)
+        : 1;
+  const perImage = Math.max(Math.ceil(baseCost * smeaMultiplier * strengthFactor), 2);
+  const tier = account?.tier?.trim().toLowerCase();
+  const isOpus = tier === "opus" && account?.active !== false;
+  const isPaperMembershipActive = tier === "paper" && account?.active === true;
+  const standardSingleImage =
+    request.action === "generate" &&
+    !request.sourceImage &&
+    samples === 1 &&
+    area <= 1_048_576 &&
+    steps <= 28;
+  const opusDiscountApplied =
+    isOpus &&
+    standardSingleImage;
+  const paperMembershipFree = isPaperMembershipActive && standardSingleImage;
+  const opusFreeSamples = opusDiscountApplied ? samples : 0;
+  const paperMembershipFreeSamples = paperMembershipFree ? samples : 0;
+  const trialImagesLeft = account?.trialImagesLeft;
+  const trialFreeSamples =
+    standardSingleImage &&
+    tier === "paper" &&
+    trialImagesLeft !== undefined
+      ? Math.min(Math.max(trialImagesLeft, 0), samples)
+      : 0;
+  const freeSamples = Math.min(
+    samples,
+    Math.max(paperMembershipFreeSamples, opusFreeSamples, trialFreeSamples),
+  );
+  const billableSamples = Math.max(samples - freeSamples, 0);
+  const freeReason =
+    paperMembershipFreeSamples > 0
+      ? "paper-membership"
+      : opusFreeSamples > 0
+        ? "opus"
+        : trialFreeSamples > 0
+          ? "paper-trial"
+          : undefined;
+
+  // Current V4/V4.5 request shape supports one Vibe reference and one
+  // Character/Precise Reference. Vibe costs only start at the fifth image;
+  // Character Reference adds 5 Anlas per requested output image.
+  const vibeReferenceSurcharge = request.referenceImage ? Math.max(1 - 4, 0) * 2 : 0;
+  const referenceSurcharge = request.directorReferenceImage ? 5 * samples : 0;
+
+  return {
+    total: perImage * billableSamples + vibeReferenceSurcharge + referenceSurcharge,
+    perImage,
+    billableSamples,
+    freeSamples,
+    freeReason,
+    opusDiscountApplied: opusFreeSamples > 0 && freeSamples > 0,
+    referenceSurcharge: vibeReferenceSurcharge + referenceSurcharge,
+  };
+}
+
+function isAnlasEstimateSupportedModel(model: string) {
+  return model === "custom" || /diffusion-(3|4|5)/.test(model);
+}
+
 function calculateAccountCost(before: AccountSummary | null, after: AccountSummary | null) {
   if (before?.points === undefined || after?.points === undefined) {
     return null;
@@ -3533,6 +4434,52 @@ function calculateAccountCost(before: AccountSummary | null, after: AccountSumma
   }
 
   return diff;
+}
+
+function formatEstimatedCost(estimate: AnlasEstimate | null) {
+  return estimate === null ? "暂不可估算" : `${formatPoints(estimate.total)} Anlas`;
+}
+
+function formatOptionalTrialImages(value?: number) {
+  return value === undefined ? "未知" : `${Math.max(0, Math.floor(value))} 张`;
+}
+
+function describeFreeGeneration(account: AccountSummary | null) {
+  const tier = account?.tier?.trim().toLowerCase();
+  if (tier === "paper" && account?.active === true) {
+    return "会员期免费";
+  }
+  if (tier === "opus" && account?.active !== false) {
+    return "Opus 条件免费";
+  }
+  if (tier === "paper" && account?.trialImagesLeft !== undefined) {
+    return `试用 ${formatOptionalTrialImages(account.trialImagesLeft)}`;
+  }
+  return "无";
+}
+
+function formatFreeGenerationReason(reason?: AnlasEstimate["freeReason"]) {
+  switch (reason) {
+    case "paper-membership":
+      return "Paper 会员期免费";
+    case "paper-trial":
+      return "Paper 试用免费";
+    case "opus":
+      return "Opus 条件免费";
+    default:
+      return "免费";
+  }
+}
+
+function describeAnlasBalance(account: AccountSummary | null) {
+  if (!account || account.points === undefined) {
+    return "Image Anlas 余额暂不可用";
+  }
+
+  const subscription = account.subscriptionPoints === undefined ? "未知" : formatPoints(account.subscriptionPoints);
+  const purchased = account.purchasedPoints === undefined ? "未知" : formatPoints(account.purchasedPoints);
+  const trial = account.trialImagesLeft === undefined ? "未知" : `${Math.max(0, Math.floor(account.trialImagesLeft))} 张`;
+  return `Image Anlas 总额 ${formatPoints(account.points)} · 固定池 ${subscription} · 购买池 ${purchased} · 免费试用 ${trial}`;
 }
 
 function formatOptionalPoints(value?: number) {

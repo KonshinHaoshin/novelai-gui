@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "NovelAI GUI - AI 图像生成",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 1120,
-        "minHeight": 680
+        "width": 1180,
+        "height": 720,
+        "minWidth": 1024,
+        "minHeight": 620
       }
     ],
     "security": {
