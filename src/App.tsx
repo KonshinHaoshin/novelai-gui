@@ -1544,26 +1544,9 @@ function App() {
         tabIndex={-1}
         type="file"
       />
-      <header className="app-titlebar">
+      <header className={activePanel === "generate" ? "app-titlebar workbench-titlebar" : "app-titlebar"}>
         <div className="titlebar-spacer" />
-        <div
-          className={
-            hasToken
-              ? account
-                ? "api-status-pill"
-                : "api-status-pill pending"
-              : "api-status-pill missing"
-          }
-        >
-          <span className="api-status-dot" />
-          <span>
-            {hasToken
-            ? account
-                ? `API 已连接${account.tier ? ` · ${account.tier}` : ""}${account.points !== undefined ? ` · ${formatPoints(account.points)} Anlas` : ""} · ${describeFreeGeneration(account)}`
-                : "API Token 已配置，待验证"
-              : "未设置 API Token"}
-          </span>
-        </div>
+        {activePanel !== "generate" ? <ApiStatusPill hasToken={hasToken} account={account} /> : null}
       </header>
 
       <div className="app-body">
@@ -1639,27 +1622,30 @@ function App() {
 
       {activePanel === "generate" ? (
         <div className="generate-workspace">
-        <div className="workbench-tabs">
-          {([
-            ["generate", "文生图"],
-            ["img2img", "图生图"],
-            ["infill", "局部重绘"],
-          ] as Array<[ImageAction, string]>).map(([action, label]) => (
-            <button
-              className={request.action === action ? "workbench-tab active" : "workbench-tab"}
-              key={action}
-              onClick={() => {
-                update("action", action);
-                if (action === "infill" && request.strength < 1) {
-                  update("strength", 1);
-                }
-              }}
-              type="button"
-            >
-              <Images aria-hidden="true" />
-              {label}
-            </button>
-          ))}
+        <div className="workbench-topbar">
+          <div className="workbench-tabs">
+            {([
+              ["generate", "文生图"],
+              ["img2img", "图生图"],
+              ["infill", "局部重绘"],
+            ] as Array<[ImageAction, string]>).map(([action, label]) => (
+              <button
+                className={request.action === action ? "workbench-tab active" : "workbench-tab"}
+                key={action}
+                onClick={() => {
+                  update("action", action);
+                  if (action === "infill" && request.strength < 1) {
+                    update("strength", 1);
+                  }
+                }}
+                type="button"
+              >
+                <Images aria-hidden="true" />
+                {label}
+              </button>
+            ))}
+          </div>
+          <ApiStatusPill hasToken={hasToken} account={account} />
         </div>
         <div className="workbench">
       <aside className="prompt-rail" aria-label="Prompt workspace">
@@ -1677,6 +1663,10 @@ function App() {
               onChange={(event) => {
                 const model = event.target.value;
                 update("model", model);
+                const defaultSteps = defaultStepsForImageModel(model);
+                if (defaultSteps !== undefined) {
+                  update("steps", defaultSteps);
+                }
                 if (!isV5ImageModel(model)) {
                   update("transparentBackground", false);
                 }
@@ -4187,6 +4177,16 @@ function isV5ImageModel(model: string) {
   return model.includes("diffusion-5");
 }
 
+function defaultStepsForImageModel(model: string) {
+  if (isV5ImageModel(model)) {
+    return 23;
+  }
+  if (model.includes("diffusion-4-5")) {
+    return 28;
+  }
+  return undefined;
+}
+
 function getUpscaleModel(model: string) {
   const normalized = model.replace(/-inpainting$/, "");
   return normalized === "custom" || normalized.trim() === "" ? undefined : normalized;
@@ -4522,6 +4522,27 @@ function describeAnlasBalance(account: AccountSummary | null) {
   const purchased = account.purchasedPoints === undefined ? "未知" : formatPoints(account.purchasedPoints);
   const trial = account.trialImagesLeft === undefined ? "未知" : `${Math.max(0, Math.floor(account.trialImagesLeft))} 张`;
   return `Image Anlas 总额 ${formatPoints(account.points)} · 固定池 ${subscription} · 购买池 ${purchased} · 免费试用 ${trial}`;
+}
+
+function ApiStatusPill(props: { hasToken: boolean; account: AccountSummary | null }) {
+  const className = props.hasToken
+    ? props.account
+      ? "api-status-pill"
+      : "api-status-pill pending"
+    : "api-status-pill missing";
+
+  return (
+    <div className={className}>
+      <span className="api-status-dot" />
+      <span>
+        {props.hasToken
+          ? props.account
+            ? `API 已连接${props.account.tier ? ` · ${props.account.tier}` : ""}${props.account.points !== undefined ? ` · ${formatPoints(props.account.points)} Anlas` : ""} · ${describeFreeGeneration(props.account)}`
+            : "API Token 已配置，待验证"
+          : "未设置 API Token"}
+      </span>
+    </div>
+  );
 }
 
 function formatOptionalPoints(value?: number) {

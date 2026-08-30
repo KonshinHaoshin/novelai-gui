@@ -178,6 +178,10 @@ h2 {
   padding: 0 12px;
 }
 
+.app-titlebar.workbench-titlebar {
+  height: 8px;
+}
+
 .titlebar-spacer {
   flex: 1;
 }
@@ -396,6 +400,19 @@ h2 {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.workbench-topbar {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workbench-topbar .api-status-pill {
+  flex: 0 0 auto;
 }
 
 .workbench-tabs {
