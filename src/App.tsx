@@ -1563,6 +1563,15 @@ function App() {
           {!sidebarCollapsed ? <span className="nav-label">工作台</span> : null}
         </button>
         <button
+          className={activePanel === "presets" ? "nav-button active" : "nav-button"}
+          onClick={() => setActivePanel("presets")}
+          title="画风"
+          type="button"
+        >
+          <WandSparkles aria-hidden="true" />
+          {!sidebarCollapsed ? <span className="nav-label">画风</span> : null}
+        </button>
+        <button
           className={activePanel === "history" ? "nav-button active" : "nav-button"}
           onClick={() => setActivePanel("history")}
           title="历史画廊"
