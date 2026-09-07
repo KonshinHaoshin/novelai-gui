@@ -741,7 +741,14 @@ function App() {
         useStream ? "generate_image_stream" : "generate_image",
         { request: buildBackendImageRequest(request, settings) },
       );
-      const displayImages = useStream ? response.images.slice(-1) : response.images;
+      let displayImages = useStream ? response.images.slice(-1) : response.images;
+      if (request.action === "infill" && request.sourceImage && request.maskImage) {
+        const source = request.sourceImage;
+        const mask = request.maskImage;
+        displayImages = await Promise.all(
+          displayImages.map((image) => restoreInpaintAlpha(image, source, mask)),
+        );
+      }
       setActiveImages(displayImages);
       setSelectedImage(0);
       setHistory((items) =>
@@ -1169,6 +1176,7 @@ function App() {
             characters: [],
             useCharacterCoords: false,
             strength: 1,
+            seed: undefined,
           }
         : {}),
     });
@@ -3620,7 +3628,7 @@ function MaskEditorModal(props: {
   const [brushMode, setBrushMode] = useState<"paint" | "erase">("paint");
   const [maskTool, setMaskTool] = useState<"brush" | "rect">("brush");
   const [brushShape, setBrushShape] = useState<"round" | "square">("round");
-  const [maskGrow, setMaskGrow] = useState(8);
+  const [maskGrow, setMaskGrow] = useState(4);
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
 
   function initializeMask(width: number, height: number) {
@@ -4240,7 +4248,7 @@ function effectivePrompt(request: ImageRequest) {
   const main = request.prompt.trim();
   const prompt = style && main ? `${style}, ${main}` : style || main;
 
-  if (request.transparentBackground && isV5ImageModel(request.model) && prompt.trim()) {
+  if (request.transparentBackground && request.action !== "infill" && isV5ImageModel(request.model) && prompt.trim()) {
     const hasTransparencyTag = splitPromptParts(prompt).some((part) => normalizePromptPart(part) === "transparent background");
     return hasTransparencyTag ? prompt : appendPromptText(prompt, "transparent background");
   }
@@ -4297,6 +4305,159 @@ function generatedImageToAsset(image: GeneratedImage): ImageAsset {
   };
 }
 
+function loadImageElement(asset: { mimeType: string; base64: string }): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片解码失败"));
+    image.src = `data:${asset.mimeType};base64,${asset.base64}`;
+  });
+}
+
+function imageAssetFromCanvas(canvas: HTMLCanvasElement, name: string): ImageAsset {
+  const dataUrl = canvas.toDataURL("image/png");
+  const marker = ";base64,";
+  const markerIndex = dataUrl.indexOf(marker);
+  return { name, mimeType: "image/png", base64: dataUrl.slice(markerIndex + marker.length) };
+}
+
+// 重绘结果在遮罩边缘会带一圈半透明的灰色洞填充残留；用羽化后的遮罩把
+// 原始源图贴回遮罩外的同时，在边界带内与结果图做渐变混合，把残留压掉。
+function featherMaskWeights(mask: ImageData, radius: number): Float32Array {
+  const width = mask.width;
+  const height = mask.height;
+  const raw = new Float32Array(width * height);
+  for (let index = 0; index < raw.length; index += 1) {
+    raw[index] = mask.data[index * 4] / 255;
+  }
+
+  let current = raw;
+  const passes = 2;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const horizontal = new Float32Array(current.length);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        let sum = 0;
+        let count = 0;
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) {
+            continue;
+          }
+          sum += current[y * width + nx];
+          count += 1;
+        }
+        horizontal[y * width + x] = sum / count;
+      }
+    }
+    const vertical = new Float32Array(current.length);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        let sum = 0;
+        let count = 0;
+        for (let dy = -radius; dy <= radius; dy += 1) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) {
+            continue;
+          }
+          sum += horizontal[ny * width + x];
+          count += 1;
+        }
+        vertical[y * width + x] = sum / count;
+      }
+    }
+    current = vertical;
+  }
+
+  // 不让结果泄漏到遮罩之外：羽化权重与原始二值遮罩相乘。
+  for (let index = 0; index < current.length; index += 1) {
+    current[index] = Math.min(current[index], raw[index]);
+  }
+  return current;
+}
+
+async function restoreInpaintAlpha(
+  result: GeneratedImage,
+  source: ImageAsset,
+  mask: ImageAsset,
+): Promise<GeneratedImage> {
+  try {
+    const [resultImage, sourceImage, maskImage] = await Promise.all([
+      loadImageElement({ mimeType: result.mimeType, base64: result.base64 }),
+      loadImageElement(source),
+      loadImageElement(mask),
+    ]);
+    const width = resultImage.naturalWidth;
+    const height = resultImage.naturalHeight;
+    if (
+      width === 0 ||
+      height === 0 ||
+      sourceImage.naturalWidth !== width ||
+      sourceImage.naturalHeight !== height ||
+      maskImage.naturalWidth !== width ||
+      maskImage.naturalHeight !== height
+    ) {
+      return result;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = width;
+    sourceCanvas.height = height;
+    const sourceContext = sourceCanvas.getContext("2d");
+    const maskCanvas = document.createElement("canvas");
+    maskCanvas.width = width;
+    maskCanvas.height = height;
+    const maskContext = maskCanvas.getContext("2d");
+    if (!context || !sourceContext || !maskContext) {
+      return result;
+    }
+
+    context.drawImage(resultImage, 0, 0);
+    sourceContext.drawImage(sourceImage, 0, 0);
+    maskContext.drawImage(maskImage, 0, 0);
+    const output = context.getImageData(0, 0, width, height);
+    const sourceData = sourceContext.getImageData(0, 0, width, height);
+    const maskData = maskContext.getImageData(0, 0, width, height);
+    const weights = featherMaskWeights(maskData, 4);
+
+    for (let index = 0; index < output.data.length; index += 4) {
+      const weight = weights[index / 4];
+      if (weight >= 1) {
+        continue;
+      }
+      // 洞填充残留的特征：贴在原本不透明的区域上、结果却是半透明像素。
+      // 这种像素直接用原图替换，避免边界上出现半透明灰圈。
+      if (sourceData.data[index + 3] > 250 && output.data[index + 3] < 250) {
+        for (let channel = 0; channel < 4; channel += 1) {
+          output.data[index + channel] = sourceData.data[index + channel];
+        }
+        continue;
+      }
+      for (let channel = 0; channel < 4; channel += 1) {
+        const resultValue = output.data[index + channel];
+        const sourceValue = sourceData.data[index + channel];
+        output.data[index + channel] = weight <= 0
+          ? sourceValue
+          : Math.round(sourceValue * (1 - weight) + resultValue * weight);
+      }
+    }
+    context.putImageData(output, 0, 0);
+    const restored = imageAssetFromCanvas(canvas, result.fileName);
+    return {
+      ...result,
+      mimeType: restored.mimeType,
+      byteLen: Math.floor(restored.base64.length * 0.75),
+      base64: restored.base64,
+    };
+  } catch {
+    return result;
+  }
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -4326,8 +4487,8 @@ function buildPayloadPreview(request: ImageRequest) {
     image_format: request.imageFormat,
     qualityToggle: request.qualityToggle,
     tag_hint_uc_preset: request.ucPreset,
-    tag_hint_transparent_background: request.transparentBackground,
-    straight_alpha: request.transparentBackground,
+    tag_hint_transparent_background: request.transparentBackground && request.action !== "infill",
+    straight_alpha: request.transparentBackground && request.action !== "infill",
     ucPreset: request.ucPreset,
     params_version: request.paramsVersion,
     dynamic_thresholding: request.dynamicThresholding,

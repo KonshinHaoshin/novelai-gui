@@ -364,7 +364,7 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
     if request.legacy_v3_extend {
         parameters["legacy_v3_extend"] = serde_json::json!(true);
     }
-    if request.transparent_background && is_v5_image_model(&api_model) {
+    if request.transparent_background && request.action != "infill" && is_v5_image_model(&api_model) {
         parameters["tag_hint_transparent_background"] = serde_json::json!(true);
         parameters["straight_alpha"] = serde_json::json!(true);
     }
