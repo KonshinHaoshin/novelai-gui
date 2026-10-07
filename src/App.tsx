@@ -710,6 +710,13 @@ function App() {
     const useStream = settings.useImageStream;
     setGenerationProgress(useStream ? { received: 0, total: request.steps, phase: "connecting" } : null);
     writeAppLog("info", "generate", `开始生成：${effectiveImageModel(request)} · ${request.width}×${request.height} · ${request.action}`);
+    if (request.action === "infill") {
+      writeAppLog(
+        "info",
+        "infill",
+        `参数：强度 ${request.strength}，噪声 ${request.noise}，颜色校正 ${request.colorCorrect}，流式 ${useStream}`,
+      );
+    }
     const beforeAccountResult = await refreshAccountStatus(false);
     if (beforeAccountResult.tokenMissing) {
       setIsGenerating(false);
@@ -741,13 +748,37 @@ function App() {
         useStream ? "generate_image_stream" : "generate_image",
         { request: buildBackendImageRequest(request, settings) },
       );
-      let displayImages = useStream ? response.images.slice(-1) : response.images;
+      const rawImages = useStream ? response.images.slice(-1) : response.images;
+      let displayImages = rawImages;
       if (request.action === "infill" && request.sourceImage && request.maskImage) {
         const source = request.sourceImage;
         const mask = request.maskImage;
         displayImages = await Promise.all(
           displayImages.map((image) => restoreInpaintAlpha(image, source, mask)),
         );
+        if (settings.enableAppLogs) {
+          try {
+            const path = await invoke<string>("save_inpaint_diagnostics", {
+              diagnostic: {
+                model: effectiveImageModel(request),
+                width: request.width,
+                height: request.height,
+                strength: request.strength,
+                noise: request.noise,
+                colorCorrect: request.colorCorrect,
+                streaming: useStream,
+                responseContentType: response.contentType,
+                source,
+                mask,
+                rawImages,
+                compositedImages: displayImages,
+              },
+            });
+            writeAppLog("success", "infill", `诊断图已保存：${path}`);
+          } catch (error) {
+            writeAppLog("warning", "infill", `诊断图保存失败：${String(error)}`);
+          }
+        }
       }
       setActiveImages(displayImages);
       setSelectedImage(0);
@@ -2821,7 +2852,7 @@ function App() {
                   onChange={(value) => updateSetting("showPayloadPreview", value)}
                 />
                 <Toggle
-                  label="启用应用日志"
+                  label="启用应用日志（局部重绘保存诊断图）"
                   checked={settings.enableAppLogs}
                   onChange={(value) => updateSetting("enableAppLogs", value)}
                 />

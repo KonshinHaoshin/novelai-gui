@@ -53,6 +53,42 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Build CLI binary
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --features cli --bin novelai-cli --release
+
+      - name: Package macOS CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p cli-dist
+          cp src-tauri/target/${{ matrix.target }}/release/novelai-cli cli-dist/
+          tar -czf novelai-cli-macos-aarch64.tar.gz -C cli-dist novelai-cli
+
+      - name: Package Windows CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force cli-dist | Out-Null
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/novelai-cli.exe" "cli-dist/novelai-cli.exe"
+          Compress-Archive -Path "cli-dist/novelai-cli.exe" -DestinationPath "novelai-cli-windows-x86_64.zip" -Force
+
+      - name: Upload CLI binary
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: novelai-cli-macos-aarch64
+          path: novelai-cli-macos-aarch64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Windows CLI binary
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: novelai-cli-windows-x86_64
+          path: novelai-cli-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Build Tauri package
         run: npm run tauri:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} --ci --no-sign
 
@@ -76,7 +112,7 @@ jobs:
       - name: Download desktop packages
         uses: actions/download-artifact@v4
         with:
-          pattern: novelai-gui-*
+          pattern: novelai-*
           path: release-assets
           merge-multiple: true
 
@@ -84,7 +120,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-files
-          find release-assets -type f \( -name '*.dmg' -o -name '*.exe' \) -exec cp {} release-files/ \;
+          find release-assets -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} release-files/ \;
           test -n "$(find release-files -type f -print -quit)"
 
       - name: Create GitHub Release

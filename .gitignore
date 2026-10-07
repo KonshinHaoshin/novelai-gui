@@ -39,3 +39,6 @@ server/
 # Test artifacts
 playwright-report/
 test-results/
+
+# Default CLI image output
+/outputs/

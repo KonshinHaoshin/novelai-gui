@@ -1,9 +1,18 @@
 [package]
 name = "novelai-gui"
-version = "0.1.3"
+version = "0.1.4"
 description = "A desktop GUI for NovelAI image generation"
 authors = ["Dongshan Randeng"]
 edition = "2021"
+default-run = "novelai-gui"
+
+[features]
+cli = ["dep:clap", "dep:image"]
+
+[[bin]]
+name = "novelai-cli"
+path = "src/bin/novelai-cli.rs"
+required-features = ["cli"]
 
 [lib]
 name = "novel_gui_lib"
@@ -14,6 +23,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 base64 = "0.22"
+clap = { version = "4", features = ["derive"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"], optional = true }
 dirs = "5"
 futures-util = "0.3"
 # keyring has no default backend; enable the native store for each desktop OS.

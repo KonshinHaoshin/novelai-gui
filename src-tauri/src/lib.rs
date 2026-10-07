@@ -8,11 +8,14 @@ use std::collections::HashSet;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_dialog::DialogExt;
+
+#[cfg(feature = "cli")]
+pub mod cli;
 
 const SERVICE_NAME: &str = "novelai-gui";
 const ACCOUNT_NAME: &str = "novelai-api-token";
@@ -157,7 +160,7 @@ struct CharacterCaptionPayload {
     centers: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneratedImage {
     pub file_name: String,
@@ -173,6 +176,30 @@ pub struct GeneratedImage {
 pub struct GenerateImageResponse {
     pub content_type: String,
     pub images: Vec<GeneratedImage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticImage {
+    mime_type: String,
+    base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InpaintDiagnostic {
+    model: String,
+    width: u32,
+    height: u32,
+    strength: f32,
+    noise: f32,
+    color_correct: bool,
+    streaming: bool,
+    response_content_type: String,
+    source: DiagnosticImage,
+    mask: DiagnosticImage,
+    raw_images: Vec<GeneratedImage>,
+    composited_images: Vec<GeneratedImage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,7 +391,8 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
     if request.legacy_v3_extend {
         parameters["legacy_v3_extend"] = serde_json::json!(true);
     }
-    if request.transparent_background && request.action != "infill" && is_v5_image_model(&api_model) {
+    if request.transparent_background && request.action != "infill" && is_v5_image_model(&api_model)
+    {
         parameters["tag_hint_transparent_background"] = serde_json::json!(true);
         parameters["straight_alpha"] = serde_json::json!(true);
     }
@@ -548,36 +576,22 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
 #[tauri::command]
 async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageResponse, String> {
     let token = read_token()?;
+    generate_image_with_token(request, &token).await
+}
+
+async fn generate_image_with_token(
+    request: ImageGenerateRequest,
+    token: &str,
+) -> Result<GenerateImageResponse, String> {
     let payload = build_image_payload(&request, false)?;
-    let client = api_client(request.allow_invalid_tls, request.proxy_url.as_deref())?;
-    let response = client
-        .post(GENERATE_IMAGE_URL)
-        .header(AUTHORIZATION, format!("Bearer {token}"))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| {
-            format_request_error(error, GENERATE_IMAGE_URL, request.proxy_url.as_deref())
-        })?;
-
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let body = response.bytes().await.map_err(to_error)?.to_vec();
-
-    if !status.is_success() {
-        return Err(format_api_error(status.as_u16(), &body));
-    }
-
-    let images = decode_generated_images(&content_type, body)?;
-    Ok(GenerateImageResponse {
-        content_type,
-        images,
-    })
+    post_zip_like(
+        GENERATE_IMAGE_URL,
+        token,
+        payload,
+        request.allow_invalid_tls,
+        request.proxy_url.as_deref(),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -712,12 +726,20 @@ async fn get_account_status(
     proxy_url: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let token = read_token()?;
-    let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
-    let data = get_json(&client, &token, USER_DATA_URL, proxy_url.as_deref()).await?;
-    let information = get_json(&client, &token, USER_INFORMATION_URL, proxy_url.as_deref())
+    account_status_with_token(allow_invalid_tls, proxy_url.as_deref(), &token).await
+}
+
+async fn account_status_with_token(
+    allow_invalid_tls: bool,
+    proxy_url: Option<&str>,
+    token: &str,
+) -> Result<serde_json::Value, String> {
+    let client = api_client(allow_invalid_tls, proxy_url)?;
+    let data = get_json(&client, token, USER_DATA_URL, proxy_url).await?;
+    let information = get_json(&client, token, USER_INFORMATION_URL, proxy_url)
         .await
         .ok();
-    let subscription = get_json(&client, &token, USER_SUBSCRIPTION_URL, proxy_url.as_deref())
+    let subscription = get_json(&client, token, USER_SUBSCRIPTION_URL, proxy_url)
         .await
         .ok();
 
@@ -983,6 +1005,91 @@ fn append_app_log(level: String, source: String, message: String) -> Result<Stri
         .map_err(to_error)?;
     file.write_all(line.as_bytes()).map_err(to_error)?;
     Ok(file_path.to_string_lossy().to_string())
+}
+
+fn diagnostic_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/jpeg" => "jpg",
+        _ => "bin",
+    }
+}
+
+fn write_diagnostic_image(
+    dir: &Path,
+    name: &str,
+    mime_type: &str,
+    base64: &str,
+) -> Result<(), String> {
+    let path = dir.join(format!("{name}.{}", diagnostic_extension(mime_type)));
+    let bytes = BASE64.decode(base64).map_err(to_error)?;
+    fs::write(path, bytes).map_err(to_error)
+}
+
+#[tauri::command]
+fn save_inpaint_diagnostics(diagnostic: InpaintDiagnostic) -> Result<String, String> {
+    if diagnostic.raw_images.len() != diagnostic.composited_images.len() {
+        return Err("局部重绘诊断图数量不匹配".to_string());
+    }
+
+    let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    dir.push("novelai-gui");
+    dir.push("logs");
+    dir.push("inpaint-diagnostics");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(to_error)?
+        .as_nanos();
+    dir.push(format!("infill-{timestamp}"));
+    fs::create_dir_all(&dir).map_err(to_error)?;
+
+    write_diagnostic_image(
+        &dir,
+        "source",
+        &diagnostic.source.mime_type,
+        &diagnostic.source.base64,
+    )?;
+    write_diagnostic_image(
+        &dir,
+        "mask",
+        &diagnostic.mask.mime_type,
+        &diagnostic.mask.base64,
+    )?;
+    for (index, image) in diagnostic.raw_images.iter().enumerate() {
+        write_diagnostic_image(
+            &dir,
+            &format!("api-raw-{index}"),
+            &image.mime_type,
+            &image.base64,
+        )?;
+    }
+    for (index, image) in diagnostic.composited_images.iter().enumerate() {
+        write_diagnostic_image(
+            &dir,
+            &format!("display-{index}"),
+            &image.mime_type,
+            &image.base64,
+        )?;
+    }
+
+    let metadata = serde_json::json!({
+        "model": diagnostic.model,
+        "requested_width": diagnostic.width,
+        "requested_height": diagnostic.height,
+        "strength": diagnostic.strength,
+        "noise": diagnostic.noise,
+        "color_correct": diagnostic.color_correct,
+        "streaming": diagnostic.streaming,
+        "response_content_type": diagnostic.response_content_type,
+        "image_count": diagnostic.raw_images.len(),
+    });
+    fs::write(
+        dir.join("request.json"),
+        serde_json::to_vec_pretty(&metadata).map_err(to_error)?,
+    )
+    .map_err(to_error)?;
+    Ok(dir.to_string_lossy().to_string())
 }
 
 fn read_token() -> Result<String, String> {
@@ -1459,7 +1566,7 @@ fn to_error(error: impl std::fmt::Display) -> String {
 fn format_request_error(error: reqwest::Error, url: &str, proxy_url: Option<&str>) -> String {
     let proxy = proxy_url.map(str::trim).filter(|value| !value.is_empty());
     let target = proxy
-        .map(|value| format!("代理 {value}"))
+        .map(|value| format!("代理 {}", safe_proxy_display(value)))
         .unwrap_or_else(|| "当前网络".to_string());
 
     if error.is_timeout() {
@@ -1470,7 +1577,23 @@ fn format_request_error(error: reqwest::Error, url: &str, proxy_url: Option<&str
         return format!("无法连接 NovelAI（{url}，使用{target}）。请检查网络或代理地址是否可用。",);
     }
 
-    format!("NovelAI 请求失败（{url}）：{}", error)
+    let details = if proxy.is_some() {
+        "请求无法完成。".to_string()
+    } else {
+        error.to_string()
+    };
+    format!("NovelAI 请求失败（{url}，使用{target}）：{details}")
+}
+
+fn safe_proxy_display(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return "[invalid proxy URL]".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 fn is_modern_image_model(model: &str) -> bool {
@@ -1521,6 +1644,7 @@ pub fn run() {
             pick_save_directory,
             reveal_in_finder,
             append_app_log,
+            save_inpaint_diagnostics,
             load_shared_presets,
             save_shared_presets
         ])
