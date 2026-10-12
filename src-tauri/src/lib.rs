@@ -910,16 +910,46 @@ fn save_generated_image(
 ) -> Result<String, String> {
     let bytes = BASE64.decode(base64).map_err(to_error)?;
     let safe_name = sanitize_file_name(&file_name);
-    let mut dir = save_directory
+    let dir = save_directory
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(default_save_directory);
     fs::create_dir_all(&dir).map_err(to_error)?;
-    dir.push(safe_name);
-    fs::write(&dir, bytes).map_err(to_error)?;
-    Ok(dir.to_string_lossy().to_string())
+
+    let requested = Path::new(&safe_name);
+    let stem = requested
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("novelai-image");
+    let extension = requested.extension().and_then(|value| value.to_str());
+    let mut suffix = 0u64;
+
+    loop {
+        let candidate = if suffix == 0 {
+            safe_name.clone()
+        } else if let Some(extension) = extension {
+            format!("{stem} ({suffix}).{extension}")
+        } else {
+            format!("{stem} ({suffix})")
+        };
+        let path = dir.join(candidate);
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                suffix = suffix
+                    .checked_add(1)
+                    .ok_or_else(|| "没有可用的图片文件名".to_string())?;
+                continue;
+            }
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        file.write_all(&bytes)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        return Ok(path.to_string_lossy().to_string());
+    }
 }
 
 #[tauri::command]
