@@ -858,8 +858,11 @@ function App() {
     }
 
     try {
+      const now = new Date();
+      const pad = (value: number) => String(value).padStart(2, "0");
+      const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${String(now.getMilliseconds()).padStart(3, "0")}`;
       const path = await invoke<string>("save_generated_image", {
-        fileName: image.fileName,
+        fileName: `${timestamp}-${image.fileName}`,
         base64: image.base64,
         saveDirectory: settings.saveDirectory.trim() || null,
       });
