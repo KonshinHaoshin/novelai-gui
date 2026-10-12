@@ -21,6 +21,10 @@ const SERVICE_NAME: &str = "novelai-gui";
 const ACCOUNT_NAME: &str = "novelai-api-token";
 const GENERATE_IMAGE_URL: &str = "https://image.novelai.net/ai/generate-image";
 const GENERATE_IMAGE_STREAM_URL: &str = "https://image.novelai.net/ai/generate-image-stream";
+const STORY_MODELS_URL: &str = "https://text.novelai.net/oa/v1/models";
+const STORY_GENERATE_STREAM_URL: &str = "https://text.novelai.net/oa/v1/chat/completions";
+const STORY_LEGACY_GENERATE_URL: &str = "https://text.novelai.net/ai/generate";
+const LEGACY_STORY_MODELS: [&str; 2] = ["llama-3-erato-v1", "kayra-v1"];
 const AUGMENT_IMAGE_URL: &str = "https://image.novelai.net/ai/augment-image";
 const ENCODE_VIBE_URL: &str = "https://image.novelai.net/ai/encode-vibe";
 const SUGGEST_TAGS_URL: &str = "https://image.novelai.net/ai/generate-image/suggest-tags";
@@ -602,6 +606,41 @@ struct ImageStreamEvent {
     image: Option<GeneratedImage>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoryGenerateRequest {
+    request_id: String,
+    model: String,
+    messages: Vec<StoryMessage>,
+    max_tokens: u32,
+    temperature: f32,
+    #[serde(default)]
+    allow_invalid_tls: bool,
+    #[serde(default)]
+    proxy_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct StoryMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoryModel {
+    id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoryGenerationEvent {
+    request_id: String,
+    kind: String,
+    delta: Option<String>,
+    message: Option<String>,
+}
+
 fn emit_image_stream_event(
     app: &AppHandle,
     kind: &str,
@@ -718,6 +757,299 @@ async fn generate_image_stream(
         content_type,
         images,
     })
+}
+
+#[tauri::command]
+async fn get_story_models(
+    allow_invalid_tls: bool,
+    proxy_url: Option<String>,
+) -> Result<Vec<StoryModel>, String> {
+    let token = read_token()?;
+    let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
+    let response = client
+        .get(STORY_MODELS_URL)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|error| format_request_error(error, STORY_MODELS_URL, proxy_url.as_deref()))?;
+    let value = response_json(response).await?;
+    let entries = value
+        .get("data")
+        .or_else(|| value.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "NovelAI 文本模型列表格式无法识别。".to_string())?;
+
+    let mut models = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| StoryModel { id: id.to_string() })
+        })
+        .collect::<Vec<_>>();
+    for id in LEGACY_STORY_MODELS {
+        if !models.iter().any(|model| model.id == id) {
+            models.push(StoryModel { id: id.to_string() });
+        }
+    }
+    models.sort_by_key(|model| {
+        let id = model.id.to_ascii_lowercase();
+        if id.contains("xialong") {
+            0
+        } else if id.contains("glm-4-6") {
+            1
+        } else if id == "llama-3-erato-v1" {
+            2
+        } else if id == "kayra-v1" {
+            3
+        } else {
+            4
+        }
+    });
+    models.dedup_by(|left, right| left.id == right.id);
+    if models.is_empty() {
+        return Err("NovelAI 没有返回可用的文本模型。".to_string());
+    }
+    Ok(models)
+}
+
+#[tauri::command]
+async fn generate_story_text(
+    app: AppHandle,
+    request: StoryGenerateRequest,
+) -> Result<String, String> {
+    let model = request.model.trim();
+    if model.is_empty() {
+        return Err("请先选择文本模型。".to_string());
+    }
+    if request.messages.is_empty()
+        || request
+            .messages
+            .iter()
+            .any(|message| !matches!(message.role.as_str(), "system" | "user" | "assistant"))
+    {
+        return Err("NovelAI 写作请求缺少有效的上下文消息。".to_string());
+    }
+    if request.max_tokens == 0 || request.max_tokens > 8192 {
+        return Err("单次续写长度须在 1 到 8192 tokens 之间。".to_string());
+    }
+    if !request.temperature.is_finite() || !(0.0..=2.0).contains(&request.temperature) {
+        return Err("Temperature 须在 0 到 2 之间。".to_string());
+    }
+
+    let token = read_token()?;
+    let client = api_client(request.allow_invalid_tls, request.proxy_url.as_deref())?;
+    if LEGACY_STORY_MODELS
+        .iter()
+        .any(|legacy_model| model.eq_ignore_ascii_case(legacy_model))
+    {
+        let input = request
+            .messages
+            .iter()
+            .map(|message| message.content.trim())
+            .filter(|content| !content.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if input.chars().count() > 40_000 {
+            return Err("Kayra / Erato 的输入长度不能超过 40,000 个字符。".to_string());
+        }
+        let payload = serde_json::json!({
+            "input": input,
+            "model": model,
+            "parameters": {
+                "min_length": 1,
+                "max_length": request.max_tokens.min(250),
+                "temperature": request.temperature,
+            },
+        });
+        let response = client
+            .post(STORY_LEGACY_GENERATE_URL)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| {
+                format_request_error(
+                    error,
+                    STORY_LEGACY_GENERATE_URL,
+                    request.proxy_url.as_deref(),
+                )
+            })?;
+        let value = response_json(response).await?;
+        let output = value
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "NovelAI 经典文本接口没有返回正文。".to_string())?
+            .to_string();
+        if output.trim().is_empty() {
+            return Err("NovelAI 文本模型没有返回正文。".to_string());
+        }
+        emit_story_generation_event(
+            &app,
+            &request.request_id,
+            "delta",
+            Some(output.clone()),
+            None,
+        );
+        emit_story_generation_event(&app, &request.request_id, "complete", None, None);
+        return Ok(output);
+    }
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": request.messages,
+        "max_tokens": request.max_tokens,
+        "temperature": request.temperature,
+        "stream": true,
+    });
+    let response = client
+        .post(STORY_GENERATE_STREAM_URL)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header("Accept", "text/event-stream")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            format_request_error(
+                error,
+                STORY_GENERATE_STREAM_URL,
+                request.proxy_url.as_deref(),
+            )
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.bytes().await.map_err(to_error)?.to_vec();
+        return Err(format_api_error(status.as_u16(), &body));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::<u8>::new();
+    let mut event_data = Vec::<String>::new();
+    let mut output = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(to_error)?;
+        buffer.extend_from_slice(&chunk);
+        while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(&buffer[..newline])
+                .trim_end_matches('\r')
+                .to_string();
+            buffer.drain(..=newline);
+            if line.is_empty() {
+                process_story_stream_event(
+                    &event_data.join("\n"),
+                    &app,
+                    &request.request_id,
+                    &mut output,
+                )?;
+                event_data.clear();
+            } else if let Some(data) = line.strip_prefix("data:") {
+                event_data.push(data.trim_start().to_string());
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        let line = String::from_utf8_lossy(&buffer);
+        if let Some(data) = line.trim_end_matches('\r').strip_prefix("data:") {
+            event_data.push(data.trim_start().to_string());
+        }
+    }
+    process_story_stream_event(
+        &event_data.join("\n"),
+        &app,
+        &request.request_id,
+        &mut output,
+    )?;
+
+    if output.trim().is_empty() {
+        return Err("NovelAI 文本模型没有返回正文。".to_string());
+    }
+    emit_story_generation_event(&app, &request.request_id, "complete", None, None);
+    Ok(output)
+}
+
+fn process_story_stream_event(
+    data: &str,
+    app: &AppHandle,
+    request_id: &str,
+    output: &mut String,
+) -> Result<(), String> {
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(());
+    }
+
+    let value: serde_json::Value = serde_json::from_str(data).map_err(to_error)?;
+    if let Some(error) = value.get("error") {
+        let message = error
+            .as_str()
+            .or_else(|| error.get("message").and_then(serde_json::Value::as_str))
+            .unwrap_or("NovelAI 文本生成返回错误。");
+        return Err(message.to_string());
+    }
+
+    let content = value
+        .pointer("/choices/0/delta/content")
+        .or_else(|| value.pointer("/choices/0/message/content"))
+        .or_else(|| value.pointer("/choices/0/text"));
+    let delta = match content {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+            .collect::<String>(),
+        _ => String::new(),
+    };
+    if !delta.is_empty() {
+        output.push_str(&delta);
+        emit_story_generation_event(app, request_id, "delta", Some(delta), None);
+    }
+    Ok(())
+}
+
+fn emit_story_generation_event(
+    app: &AppHandle,
+    request_id: &str,
+    kind: &str,
+    delta: Option<String>,
+    message: Option<String>,
+) {
+    let _ = app.emit(
+        "story-generation-event",
+        StoryGenerationEvent {
+            request_id: request_id.to_string(),
+            kind: kind.to_string(),
+            delta,
+            message,
+        },
+    );
+}
+
+#[tauri::command]
+async fn export_novel_text(
+    app: AppHandle,
+    file_name: String,
+    content: String,
+) -> Result<Option<String>, String> {
+    let safe_name = sanitize_file_name(&file_name);
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<PathBuf>>();
+    app.dialog()
+        .file()
+        .set_title("导出小说正文")
+        .set_file_name(safe_name)
+        .add_filter("纯文本", &["txt"])
+        .save_file(move |path| {
+            let path = path.and_then(|file_path| file_path.into_path().ok());
+            let _ = tx.send(path);
+        });
+
+    let Some(path) = rx.await.unwrap_or(None) else {
+        return Ok(None);
+    };
+    fs::write(&path, content).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(Some(path.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -1665,6 +1997,9 @@ pub fn run() {
             get_account_status,
             generate_image,
             generate_image_stream,
+            get_story_models,
+            generate_story_text,
+            export_novel_text,
             suggest_tags,
             upscale_image,
             augment_image,

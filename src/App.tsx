@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Braces,
+  BookOpen,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -38,6 +39,7 @@ import type { ChangeEvent, ClipboardEvent as ReactClipboardEvent, DragEvent as R
 import { createPortal } from "react-dom";
 import appIcon from "../icon.png";
 import { PresetsPage } from "./PresetsPage";
+import { WritingStudio } from "./WritingStudio";
 import {
   fromSharedPresets,
   loadPresetStore,
@@ -395,7 +397,7 @@ function App() {
   const [styleTemplatePage, setStyleTemplatePage] = useState(0);
   const [sizePresetOpen, setSizePresetOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
-  const [activePanel, setActivePanel] = useState<"generate" | "history" | "presets" | "settings" | "favorites">("generate");
+  const [activePanel, setActivePanel] = useState<"generate" | "writing" | "history" | "presets" | "settings" | "favorites">("generate");
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [presetStore, setPresetStore] = useState<PresetStore>(() => loadPresetStore());
   const [presetSyncReady, setPresetSyncReady] = useState(() => !isTauriRuntime());
@@ -1695,6 +1697,15 @@ function App() {
           {!sidebarCollapsed ? <span className="nav-label">工作台</span> : null}
         </button>
         <button
+          className={activePanel === "writing" ? "nav-button active" : "nav-button"}
+          onClick={() => setActivePanel("writing")}
+          title="小说写作"
+          type="button"
+        >
+          <BookOpen aria-hidden="true" />
+          {!sidebarCollapsed ? <span className="nav-label">小说写作</span> : null}
+        </button>
+        <button
           className={activePanel === "presets" ? "nav-button active" : "nav-button"}
           onClick={() => setActivePanel("presets")}
           title="画风"
@@ -2702,6 +2713,13 @@ function App() {
       ) : null}
         </div>
         </div>
+      ) : activePanel === "writing" ? (
+        <WritingStudio
+          hasToken={hasToken}
+          allowInvalidTls={settings.allowInvalidTls}
+          proxyUrl={activeNovelAiProxyUrl(settings)}
+          onOpenSettings={() => setActivePanel("settings")}
+        />
       ) : activePanel === "history" ? (
         <HistoryGalleryPage
           history={history}
