@@ -40,6 +40,7 @@ import { createPortal } from "react-dom";
 import appIcon from "../icon.png";
 import { PresetsPage } from "./PresetsPage";
 import { WritingStudio } from "./WritingStudio";
+import { LocalApiSettings } from "./LocalApiSettings";
 import {
   fromSharedPresets,
   loadPresetStore,
@@ -398,6 +399,7 @@ function App() {
   const [sizePresetOpen, setSizePresetOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [activePanel, setActivePanel] = useState<"generate" | "writing" | "history" | "presets" | "settings" | "favorites">("generate");
+  const [writingVisited, setWritingVisited] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [presetStore, setPresetStore] = useState<PresetStore>(() => loadPresetStore());
   const [presetSyncReady, setPresetSyncReady] = useState(() => !isTauriRuntime());
@@ -1698,7 +1700,7 @@ function App() {
         </button>
         <button
           className={activePanel === "writing" ? "nav-button active" : "nav-button"}
-          onClick={() => setActivePanel("writing")}
+          onClick={() => { setWritingVisited(true); setActivePanel("writing"); }}
           title="小说写作"
           type="button"
         >
@@ -1757,6 +1759,17 @@ function App() {
       </nav>
 
       <div className="app-workspace">
+
+      {writingVisited ? (
+        <div className="writing-page-host" hidden={activePanel !== "writing"}>
+          <WritingStudio
+            hasToken={hasToken}
+            allowInvalidTls={settings.allowInvalidTls}
+            proxyUrl={activeNovelAiProxyUrl(settings)}
+            onOpenSettings={() => setActivePanel("settings")}
+          />
+        </div>
+      ) : null}
 
       {activePanel === "generate" ? (
         <div className="generate-workspace">
@@ -2713,14 +2726,7 @@ function App() {
       ) : null}
         </div>
         </div>
-      ) : activePanel === "writing" ? (
-        <WritingStudio
-          hasToken={hasToken}
-          allowInvalidTls={settings.allowInvalidTls}
-          proxyUrl={activeNovelAiProxyUrl(settings)}
-          onOpenSettings={() => setActivePanel("settings")}
-        />
-      ) : activePanel === "history" ? (
+      ) : activePanel === "writing" ? null : activePanel === "history" ? (
         <HistoryGalleryPage
           history={history}
           isFavorited={isImageFavorited}
@@ -2810,6 +2816,7 @@ function App() {
           </header>
 
           <div className="settings-grid">
+            <LocalApiSettings hasToken={hasToken} allowInvalidTls={settings.allowInvalidTls} proxyUrl={activeNovelAiProxyUrl(settings)} />
             <section className="settings-panel">
               <div className="section-head">
                 <KeyRound aria-hidden="true" />

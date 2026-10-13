@@ -205,6 +205,62 @@ npm run cli -- generate --request ./request.json --seed 123 --dry-run
 JSON 也可以包含 `sourceImage`、`maskImage`、参考图等高级字段的 Base64 数据。
 `--dry-run` 和输出记录会省略图像数据；预览是用于检查的摘要，不能直接重放。
 
+## 本地 OpenAI 兼容文本 API
+
+在 GUI「设置 → 本地 OpenAI API」中启动服务，默认地址为 `http://127.0.0.1:18765/v1`。
+GUI 可停止服务、复制 Base URL 和访问密钥；服务随应用退出而停止。
+CLI 也可以独立运行同一服务：
+
+```bash
+npm run cli -- serve --port 18765
+# 独立发布的 CLI：novelai-cli serve --port 18765
+# Ctrl+C 停止
+```
+
+服务读取现有 NovelAI Token。CLI 支持 `NOVELAI_API_TOKEN`、`--proxy`、`--allow-invalid-tls`；
+GUI 使用启动时的 Token、代理与 TLS 设置，修改这些设置后需重启服务。
+默认只监听本机；需要其他地址时使用 `--host` 或 GUI 监听地址输入框。
+GUI 和 CLI 是独立服务，不能同时占用相同监听地址与端口。
+
+访问密钥与 NovelAI 账户 Token 独立，默认存入系统凭据并由 GUI / CLI 共用。
+可使用 `novelai-cli gateway-key` 读取本地密钥，或用至少 16 字符的 `NOVELAI_GATEWAY_API_KEY` 覆盖。
+启动日志不输出任何密钥。客户端认证格式为 `Authorization: Bearer <本地密钥>`。
+
+支持：
+
+- `GET /health`：服务健康检查。
+- `GET /v1/models`：`glm-4-6`、`xialong-v1`。
+- `POST /v1/chat/completions`：文本消息，支持普通 JSON 和实时 SSE 流式输出。
+
+上游统一使用 NovelAI 的流式接口，避免其非流式响应只包含 token ID 的情况。
+服务把 SSE 内容规范化为 `choices[].delta.content`，或聚合成 `choices[].message.content`。
+单次输出上限 8,192 tokens，上游未提供 usage 时用零表示未知，不估算消耗。
+工具调用使用提示词适配：网关把 function 工具定义与调用历史转换为文本，解析模型返回的 JSON 调用，输出标准 `tool_calls`；工具由客户端执行，结果通过 `role: tool` 回传。
+支持 `tool_choice` 的 auto / none / required / 指定函数。工具模式先收齐上游输出再返回（包括流式请求），解析失败或工具名称、必填参数不符时返回错误，不执行任何工具。
+这属于协议适配，不是 NovelAI 原生工具接口；成功率取决于模型是否遵循格式。图片、音频和 Anthropic Messages API 不在此服务范围内。
+
+### GUI 一键写入 OpenCode
+
+在「设置 → 本地 OpenAI API → 接入 OpenCode」选择模型，启动服务，然后点击「一键写入 OpenCode 配置」。
+自动合并 `~/.config/opencode/opencode.json`（遵循 `XDG_CONFIG_HOME`，已有 JSONC 时更新 JSONC），保留其他 provider 与智能体，并备份原文件。
+JSONC 更新后整理为 JSON，注释仍保留在备份。独立访问密钥写入旁边的 `novelai-gateway.key`，配置使用 `{file:...}` 引用；Unix 文件权限为 600，不写入 NovelAI 账户 Token。
+默认不改变当前默认模型；勾选选项后设置所选模型及 `novelai` 智能体为默认。重开 OpenCode，选择 NovelAI 模型和 `novelai` 智能体即可使用工具适配。项目配置或 `OPENCODE_CONFIG` 可能覆盖全局设置。
+
+### 接入 OpenCode 文本模式
+
+[示例配置](./examples/opencode-local-text.json) 使用 `@ai-sdk/openai-compatible`，关闭工具调用。
+安装版 CLI 可通过以下方式给 OpenCode 提供密钥；从源码运行时先用 `npm run cli:build` 构建 CLI。
+
+```bash
+export NOVELAI_GATEWAY_API_KEY="$(novelai-cli gateway-key)"
+export OPENCODE_CONFIG="/你的路径/novelai-gui/examples/opencode-local-text.json"
+opencode run --agent text --model novelai/glm-4-6 "帮我构思一个小说开篇"
+# 也可选择 --model novelai/xialong-v1
+```
+
+该手动示例关闭工具，适合纯文本写作；需要读文件和改代码时使用 GUI 写入的 `novelai` 智能体及工具适配配置。
+Claude Code 使用 Anthropic Messages 格式，不能直接连接这一版 OpenAI 端点。
+
 ## API 文档
 
 本仓库内的 [NovelAI-API-Docs.md](./NovelAI-API-Docs.md) 整理了 NovelAI Primary API、图像生成专用 API 和相关 schema。官方入口：

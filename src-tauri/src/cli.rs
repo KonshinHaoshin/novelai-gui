@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "novelai-cli",
     version,
-    about = "NovelAI image generation from the terminal"
+    about = "NovelAI image generation and local OpenAI-compatible text API"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -15,6 +15,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CliCommand {
+    /// Serve a local OpenAI-compatible text API until Ctrl+C
+    Serve(ServeArgs),
+    /// Print the local gateway key (not the NovelAI account token)
+    GatewayKey,
     /// Generate images, or edit an existing image with an optional mask
     Generate(Box<GenerateArgs>),
     /// Print account data, subscription and Anlas information as JSON
@@ -68,6 +72,16 @@ struct NetworkArgs {
     /// Accept invalid TLS certificates
     #[arg(long)]
     allow_invalid_tls: bool,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    #[arg(long, default_value_t = 18765)]
+    port: u16,
+    #[command(flatten)]
+    network: NetworkArgs,
 }
 
 #[derive(Args, Default)]
@@ -151,6 +165,28 @@ struct GenerateArgs {
 
 pub async fn run() -> Result<(), String> {
     match Cli::parse().command {
+        CliCommand::Serve(args) => {
+            let server = gateway::spawn(
+                gateway::GatewayConfig {
+                    host: args.host,
+                    port: args.port,
+                    allow_invalid_tls: args.network.allow_invalid_tls,
+                    proxy_url: args.network.proxy,
+                },
+                cli_token()?,
+            )
+            .await?;
+            print_json(
+                &serde_json::json!({ "listening": server.status, "authentication": "Bearer local gateway key", "keyCommand": "novelai-cli gateway-key", "stop": "Ctrl+C" }),
+            )?;
+            tokio::signal::ctrl_c().await.map_err(to_error)?;
+            server.stop().await;
+            Ok(())
+        }
+        CliCommand::GatewayKey => {
+            println!("{}", gateway::get_gateway_key()?);
+            Ok(())
+        }
         CliCommand::Generate(args) => generate(*args).await,
         CliCommand::Account(args) => {
             let value = account_status_with_token(

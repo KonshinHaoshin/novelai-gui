@@ -1,0 +1,27 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "novelai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NovelAI Local Text",
+      "options": {
+        "baseURL": "http://127.0.0.1:18765/v1",
+        "apiKey": "{env:NOVELAI_GATEWAY_API_KEY}"
+      },
+      "models": {
+        "glm-4-6": { "name": "GLM-4.6", "tool_call": false, "limit": { "context": 28672, "output": 8192 } },
+        "xialong-v1": { "name": "Xialong", "tool_call": false, "limit": { "context": 28672, "output": 8192 } }
+      }
+    }
+  },
+  "model": "novelai/glm-4-6",
+  "small_model": "novelai/glm-4-6",
+  "agent": {
+    "text": {
+      "description": "通过本地 NovelAI API 进行纯文本对话",
+      "mode": "primary",
+      "tools": { "*": false },
+      "prompt": "你是文本写作助手。按用户要求回答，只提供文本，不使用任何工具。"
+    }
+  }
+}

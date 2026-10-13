@@ -16,6 +16,9 @@ use tauri_plugin_dialog::DialogExt;
 
 #[cfg(feature = "cli")]
 pub mod cli;
+pub mod gateway;
+pub mod opencode;
+mod tool_adapter;
 
 const SERVICE_NAME: &str = "novelai-gui";
 const ACCOUNT_NAME: &str = "novelai-api-token";
@@ -1990,9 +1993,16 @@ fn effective_image_model(model: &str, action: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(gateway::GatewayManager::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             has_api_token,
+            gateway::start_gateway,
+            gateway::stop_gateway,
+            gateway::gateway_status,
+            gateway::get_gateway_key,
+            opencode::opencode_integration,
+            opencode::write_opencode_config,
             save_api_token,
             get_account_status,
             generate_image,
