@@ -2816,7 +2816,7 @@ function App() {
           </header>
 
           <div className="settings-grid">
-            <LocalApiSettings hasToken={hasToken} allowInvalidTls={settings.allowInvalidTls} proxyUrl={activeNovelAiProxyUrl(settings)} />
+            <div className="settings-column">
             <section className="settings-panel">
               <div className="section-head">
                 <KeyRound aria-hidden="true" />
@@ -2936,6 +2936,9 @@ function App() {
               </div>
             </section>
 
+            </div>
+            <div className="settings-column">
+            <LocalApiSettings hasToken={hasToken} allowInvalidTls={settings.allowInvalidTls} proxyUrl={activeNovelAiProxyUrl(settings)} />
             <section className="settings-panel wide save-directory-panel">
               <div className="section-head">
                 <FolderOpen aria-hidden="true" />
@@ -3007,6 +3010,7 @@ function App() {
                 <span>噪声调度：{DEFAULT_REQUEST.noiseSchedule}</span>
               </div>
             </section>
+            </div>
           </div>
 
           {notice ? <div className={`notice settings-notice ${notice.type}`}>{notice.message}</div> : null}

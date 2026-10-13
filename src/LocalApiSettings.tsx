@@ -17,6 +17,7 @@ export function LocalApiSettings({ hasToken, allowInvalidTls, proxyUrl }: Props)
   const [integration, setIntegration] = useState<Integration | null>(null);
   const [writing, setWriting] = useState(false);
   const [integrationNotice, setIntegrationNotice] = useState("");
+  const [backupPath, setBackupPath] = useState<string | null>(null);
   useEffect(() => {
     if (!isTauri()) return;
     let disposed = false;
@@ -27,10 +28,11 @@ export function LocalApiSettings({ hasToken, allowInvalidTls, proxyUrl }: Props)
     return () => { disposed = true; };
   }, [host, port, status.baseUrl, model, makeDefault]);
   const writeConfig = async () => {
-    setWriting(true); setIntegrationNotice("");
+    setWriting(true); setIntegrationNotice(""); setBackupPath(null);
     try {
       const result = await invoke<{ path: string; backupPath: string | null }>("write_opencode_config", { model, makeDefault });
-      setIntegrationNotice(`已写入 ${result.path}。${result.backupPath ? `原配置备份：${result.backupPath}。` : ""}重新打开 OpenCode，选择 NovelAI 模型与 novelai 智能体。`);
+      setBackupPath(result.backupPath);
+      setIntegrationNotice("配置已写入。重开 OpenCode，选择 NovelAI 模型与 novelai 智能体。");
     } catch (error) { setIntegrationNotice(String(error)); }
     finally { setWriting(false); }
   };
@@ -92,6 +94,7 @@ export function LocalApiSettings({ hasToken, allowInvalidTls, proxyUrl }: Props)
         {!status.running ? <p className="local-api-description">先启动本地 API，再写入配置。</p> : null}
         {integration ? <details className="opencode-config-preview"><summary>查看配置</summary><pre>{JSON.stringify(integration.config, null, 2)}</pre></details> : null}
         {integrationNotice ? <p className="local-api-notice" role="status">{integrationNotice}</p> : null}
+        {backupPath ? <details className="opencode-config-preview"><summary>原配置备份位置</summary><p className="local-api-description opencode-config-path">{backupPath}</p></details> : null}
       </div>
     </section>
   );
