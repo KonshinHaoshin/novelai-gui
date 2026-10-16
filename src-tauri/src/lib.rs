@@ -546,12 +546,10 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
                     .unwrap_or(0.4);
                 descriptions.len()
             ]);
-        parameters["director_reference_information_extracted"] = serde_json::json!(vec![
-                request
-                    .director_reference_information_extracted
-                    .unwrap_or(0.6);
-                descriptions.len()
-            ]);
+        // NovelAI requires exactly 1.0 for every director reference. Override values
+        // from older GUI settings and CLI requests instead of forwarding them.
+        parameters["director_reference_information_extracted"] =
+            serde_json::json!(vec![1.0; descriptions.len()]);
     }
 
     if let Some(condition) = request

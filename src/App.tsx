@@ -320,7 +320,7 @@ const DEFAULT_REQUEST: ImageRequest = {
   directorReferencePrompt: "",
   directorReferenceStrength: 0.6,
   directorReferenceSecondaryStrength: 0.4,
-  directorReferenceInformationExtracted: 0.6,
+  directorReferenceInformationExtracted: 1.0,
   addOriginalImage: false,
   legacyV3Extend: false,
   upscaledEnhance: false,
@@ -4611,7 +4611,7 @@ function buildPayloadPreview(request: ImageRequest) {
     }));
     parameters.director_reference_strength_values = directorImages.map(() => request.directorReferenceStrength);
     parameters.director_reference_secondary_strength_values = directorImages.map(() => request.directorReferenceSecondaryStrength);
-    parameters.director_reference_information_extracted = directorImages.map(() => request.directorReferenceInformationExtracted);
+    parameters.director_reference_information_extracted = directorImages.map(() => 1.0);
   }
   if (request.controlnetCondition.trim()) {
     parameters.controlnet_condition = request.controlnetCondition;
@@ -4766,7 +4766,8 @@ function normalizeImageRequest(request: ImageRequest): ImageRequest {
     directorReferencePrompt: request.directorReferencePrompt ?? "",
     directorReferenceStrength: clamp01(request.directorReferenceStrength ?? DEFAULT_REQUEST.directorReferenceStrength),
     directorReferenceSecondaryStrength: clamp01(request.directorReferenceSecondaryStrength ?? DEFAULT_REQUEST.directorReferenceSecondaryStrength),
-    directorReferenceInformationExtracted: clamp01(request.directorReferenceInformationExtracted ?? DEFAULT_REQUEST.directorReferenceInformationExtracted),
+    // NovelAI currently requires exactly 1.0, including when restoring older presets.
+    directorReferenceInformationExtracted: 1.0,
     controlnetCondition: request.controlnetCondition ?? DEFAULT_REQUEST.controlnetCondition,
     controlnetModel: request.controlnetModel ?? DEFAULT_REQUEST.controlnetModel,
     controlnetStrength: clamp01(request.controlnetStrength ?? DEFAULT_REQUEST.controlnetStrength),

@@ -352,7 +352,7 @@ NovelAI 提供两套 API：
 | `director_reference_descriptions` | array | CR 参考描述（V4ConditionInput 数组） |
 | `director_reference_strength_values` | array | CR Fidelity 滑杆值（0-1） |
 | `director_reference_secondary_strength_values` | array | CR 二级强度值（0-1） |
-| `director_reference_information_extracted` | array | CR 信息提取量（0-1） |
+| `director_reference_information_extracted` | array | CR 信息提取量；当前每张参考图必须固定为 `1.0`，其他值会返回 HTTP 400 |
 
 #### image.V4ConditionInput
 

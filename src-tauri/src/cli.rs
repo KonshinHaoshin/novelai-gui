@@ -261,7 +261,7 @@ fn default_request() -> Value {
         "referenceImages": [], "referenceStrengths": [], "referenceInformationExtractedMultiple": [],
         "directorReferenceImage": null, "directorReferencePrompt": null,
         "directorReferenceStrength": null, "directorReferenceSecondaryStrength": null,
-        "directorReferenceInformationExtracted": null, "directorReferenceImages": [],
+        "directorReferenceInformationExtracted": 1.0, "directorReferenceImages": [],
         "directorReferenceMode": null, "controlnetCondition": null, "controlnetModel": null,
         "controlnetStrength": null, "allowInvalidTls": false, "proxyUrl": null,
     });
@@ -823,6 +823,56 @@ mod tests {
         );
         assert!(prepare_request(&args(&["cli", "generate"])).is_err());
         assert!(Cli::try_parse_from(["cli", "generate", "--action", "typo"]).is_err());
+    }
+
+    #[test]
+    fn director_references_override_legacy_extraction_values() {
+        let mut value = default_request();
+        value["prompt"] = "1girl".into();
+        let mut request: ImageGenerateRequest = serde_json::from_value(value).unwrap();
+        assert!(build_image_payload(&request, false).unwrap()["parameters"]
+            .get("director_reference_information_extracted")
+            .is_none());
+
+        // Single-image legacy requests and multiple references must both follow
+        // the upstream contract, regardless of the saved extraction value.
+        for extracted in [None, Some(0.6), Some(0.0), Some(1.0)] {
+            request.director_reference_information_extracted = extracted;
+            request.director_reference_image = Some("single-reference".into());
+            request.director_reference_images.clear();
+            request.director_reference_strength = Some(0.5);
+            request.director_reference_secondary_strength = Some(0.25);
+            for streaming in [false, true] {
+                let payload = build_image_payload(&request, streaming).unwrap();
+                assert_eq!(
+                    payload["parameters"]["director_reference_information_extracted"],
+                    serde_json::json!([1.0])
+                );
+            }
+
+            request.director_reference_images =
+                vec!["first".into(), " ".into(), "second".into()];
+            for streaming in [false, true] {
+                let payload = build_image_payload(&request, streaming).unwrap();
+                let parameters = &payload["parameters"];
+                assert_eq!(
+                    parameters["director_reference_information_extracted"],
+                    serde_json::json!([1.0, 1.0])
+                );
+                assert_eq!(
+                    parameters["director_reference_images"].as_array().unwrap().len(),
+                    2
+                );
+                assert_eq!(
+                    parameters["director_reference_strength_values"],
+                    serde_json::json!([0.5, 0.5])
+                );
+                assert_eq!(
+                    parameters["director_reference_secondary_strength_values"],
+                    serde_json::json!([0.25, 0.25])
+                );
+            }
+        }
     }
 
     #[test]
