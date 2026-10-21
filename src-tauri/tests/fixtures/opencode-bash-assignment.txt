@@ -1,0 +1,32 @@
+
+我来帮您分析这台Mac的情况。让我先检查系统的基本信息和状态。
+
+<tool_code>
+<bash>
+command="system_profiler SPHardwareDataType"
+</bash>
+</tool_code>
+
+<tool_code>
+<bash>
+command="system_profiler SPSoftwareDataType"
+</bash>
+</tool_code>
+
+<tool_code>
+<bash>
+command="df -h"
+</bash>
+</tool_code>
+
+<tool_code>
+<bash>
+command="top -l 1 | head -20"
+</bash>
+</tool_code>
+
+<tool_code>
+<bash>
+command="ps aux | head -20"
+</bash>
+</tool_code>

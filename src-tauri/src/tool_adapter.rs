@@ -13,12 +13,27 @@ impl ToolAdapter {
             regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap();
         for tool in &self.tools {
             let name = tool["function"]["name"].as_str().unwrap();
-            let pattern = regex::Regex::new(&format!(r"<{}(?:\s[^>]*)?>", regex::escape(name)))
-                .map_err(|_| "工具名称无效。")?;
+            let escaped = regex::escape(name);
+            let pattern = regex::Regex::new(&format!(
+                r#"<(?:{escaped}(?:\s[^>]*)?|(?:invoke|function)\s+name\s*=\s*["']{escaped}["']\s*|(?:invoke|function)={escaped}|(?:invoke|function)>\s*<name>\s*{escaped}\s*</name\s*)>"#
+            )).map_err(|_| "工具名称无效。")?;
             for tag in pattern.find_iter(text) {
+                let wrapper = if tag.as_str().starts_with("<invoke ")
+                    || tag.as_str().starts_with("<invoke=")
+                    || tag.as_str().starts_with("<invoke>")
+                {
+                    "invoke"
+                } else if tag.as_str().starts_with("<function ")
+                    || tag.as_str().starts_with("<function=")
+                    || tag.as_str().starts_with("<function>")
+                {
+                    "function"
+                } else {
+                    name
+                };
                 let remainder = &text[tag.end()..];
                 let end = remainder
-                    .find(&format!("</{name}>"))
+                    .find(&format!("</{wrapper}>"))
                     .ok_or("XML 工具调用未完成。")?;
                 let body = remainder[..end].trim();
                 let decode_entities = |raw: &str| {
@@ -59,12 +74,70 @@ impl ToolAdapter {
                     }
                 } else {
                     let mut args = serde_json::Map::new();
-                    for capture in attributes.captures_iter(tag.as_str()) {
+                    for capture in
+                        attributes.captures_iter(if wrapper == name { tag.as_str() } else { "" })
+                    {
                         let key = &capture[1];
                         let raw = capture.get(2).or_else(|| capture.get(3)).unwrap().as_str();
                         args.insert(key.into(), parameter_value(key, raw)?);
                     }
-                    if !body.is_empty() {
+                    let assignments = regex::Regex::new(
+                        r#"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|'([^']*)')"#,
+                    )
+                    .unwrap();
+                    let mut assignment_tail = body;
+                    let mut body_args = serde_json::Map::new();
+                    while let Some(capture) = assignments.captures(assignment_tail) {
+                        let whole = capture.get(0).unwrap();
+                        if whole.start() != 0 {
+                            break;
+                        }
+                        let key = &capture[1];
+                        if tool["function"]["parameters"]["properties"][key].is_null() {
+                            break;
+                        }
+                        let raw = if let Some(value) = capture.get(2) {
+                            serde_json::from_str::<String>(&format!("\"{}\"", value.as_str()))
+                                .map_err(|_| "XML 工具参数转义无效。")?
+                        } else {
+                            capture[3].to_string()
+                        };
+                        if body_args
+                            .insert(key.into(), parameter_value(key, &raw)?)
+                            .is_some()
+                        {
+                            return Err("XML 工具参数重复。".into());
+                        }
+                        assignment_tail = assignment_tail[whole.end()..].trim();
+                    }
+                    if !body_args.is_empty() {
+                        if !assignment_tail.is_empty() {
+                            return Err("XML 工具赋值参数不完整。".into());
+                        }
+                        for (key, value) in body_args {
+                            if args.insert(key, value).is_some() {
+                                return Err("XML 工具参数重复。".into());
+                            }
+                        }
+                    } else if !body.is_empty() && !body.starts_with(['<', '{', '[', '`']) {
+                        // OpenCode's bash tool has one required string (command).
+                        // Only map a raw body when the schema makes that mapping
+                        // unambiguous; never guess between multiple parameters.
+                        let parameters = &tool["function"]["parameters"];
+                        let required = parameters["required"]
+                            .as_array()
+                            .ok_or("XML 工具缺少命名参数。")?;
+                        if required.len() != 1 {
+                            return Err("XML 工具参数存在歧义，请使用命名参数。".into());
+                        }
+                        let key = required[0].as_str().ok_or("工具参数定义无效。")?;
+                        if parameters["properties"][key]["type"] != "string"
+                            || args.contains_key(key)
+                        {
+                            return Err("XML 工具正文无法映射到唯一字符串参数。".into());
+                        }
+                        args.insert(key.into(), json!(decode_entities(body)));
+                    } else if !body.is_empty() {
                         // Accept named XML parameters, but consume the entire body so
                         // malformed or extra content cannot be silently discarded.
                         let opening = regex::Regex::new(
@@ -273,7 +346,12 @@ impl ToolAdapter {
         if envelope.is_none()
             && (trimmed.contains("<tool_call>")
                 || trimmed.contains("<function=")
-                || trimmed.contains("<invoke="))
+                || trimmed.contains("<invoke=")
+                || trimmed.contains("<invoke ")
+                || trimmed.contains("<function ")
+                || trimmed.contains("<tool_calls>")
+                || trimmed.contains("<function>")
+                || trimmed.contains("<invoke>"))
         {
             return Err("模型返回了无法解析的工具格式，请重试。".into());
         }
@@ -440,6 +518,73 @@ mod tests {
                 .decode(&format!("<bash>{body}</bash>"), "stop")
                 .is_err());
         }
+    }
+    #[test]
+    fn replays_actual_opencode_mac_analysis_responses() {
+        let mut input = request();
+        input["tools"][0]["function"] = json!({"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}});
+        let adapter = ToolAdapter::prepare(&mut input).unwrap().unwrap();
+        let raw = include_str!("../tests/fixtures/opencode-bash-raw.txt");
+        let (message, finish) = adapter.decode(raw, "stop").unwrap();
+        assert_eq!(finish, "tool_calls");
+        let calls = message["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 5);
+        let args = |call: &Value| {
+            serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap()
+        };
+        assert_eq!(
+            args(&calls[0])["command"],
+            "system_profiler SPHardwareDataType"
+        );
+        assert_eq!(args(&calls[4])["command"], "df -h");
+        let nested = include_str!("../tests/fixtures/opencode-function-name-xml.txt");
+        let (nested_message, nested_finish) = adapter.decode(nested, "stop").unwrap();
+        assert_eq!(nested_finish, "tool_calls");
+        assert_eq!(nested_message["tool_calls"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            args(&nested_message["tool_calls"][0])["command"],
+            "system_profiler SPHardwareDataType"
+        );
+        let assignment = include_str!("../tests/fixtures/opencode-bash-assignment.txt");
+        let (assignment_message, assignment_finish) = adapter.decode(assignment, "stop").unwrap();
+        assert_eq!(assignment_finish, "tool_calls");
+        assert_eq!(
+            args(&assignment_message["tool_calls"][0])["command"],
+            "system_profiler SPHardwareDataType"
+        );
+        assert_eq!(
+            assignment_message["tool_calls"].as_array().unwrap().len(),
+            5
+        );
+        let invoke = include_str!("../tests/fixtures/opencode-invoke-xml.txt");
+        let (message, finish) = adapter.decode(invoke, "stop").unwrap();
+        assert_eq!(finish, "tool_calls");
+        assert_eq!(
+            args(&message["tool_calls"][0])["command"],
+            "system_profiler SPHardwareDataType"
+        );
+        for text in [
+            "<function name='bash'><command>sw_vers</command></function>",
+            "<invoke=bash><parameter name='command'>sw_vers</parameter></invoke>",
+        ] {
+            assert_eq!(adapter.decode(text, "stop").unwrap().1, "tool_calls");
+        }
+        assert!(adapter.decode(raw, "length").is_err());
+        assert!(adapter
+            .decode(
+                "<invoke name=\"missing\"><command>pwd</command></invoke>",
+                "stop"
+            )
+            .is_err());
+        assert!(adapter.decode("<bash>{bad json}</bash>", "stop").is_err());
+        let mut input = request();
+        input["tools"] = json!(adapter.tools);
+        input["tool_choice"] = json!("none");
+        assert!(ToolAdapter::prepare(&mut input)
+            .unwrap()
+            .unwrap()
+            .decode(raw, "stop")
+            .is_err());
     }
     #[test]
     fn rejects_unknown_missing_and_truncated_calls() {

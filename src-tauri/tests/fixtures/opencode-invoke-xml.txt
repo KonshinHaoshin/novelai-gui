@@ -1,0 +1,7 @@
+
+我来帮您分析这台Mac的情况。让我收集系统信息和硬件配置。
+
+<tool_calls>
+<invoke name="bash">
+<parameter name="command">system_profiler SPHardwareDataType</parameter>
+</invoke>

@@ -250,6 +250,7 @@ GUI 和 CLI 是独立服务，不能同时占用相同监听地址与端口。
 服务把 SSE 内容规范化为 `choices[].delta.content`，或聚合成 `choices[].message.content`。
 单次输出上限 8,192 tokens，上游未提供 usage 时用零表示未知，不估算消耗。
 工具调用使用提示词适配：网关把 function 工具定义与调用历史转换为文本，解析模型返回的 JSON 调用，输出标准 `tool_calls`；工具由客户端执行，结果通过 `role: tool` 回传。
+支持 JSON 调用、命名 XML 参数、`invoke` / `function` 包装；当工具只有一个必填字符串参数时，也支持标签内直接给出参数正文。
 支持 `tool_choice` 的 auto / none / required / 指定函数。工具模式先收齐上游输出再返回（包括流式请求），解析失败或工具名称、必填参数不符时返回错误，不执行任何工具。
 这属于协议适配，不是 NovelAI 原生工具接口；成功率取决于模型是否遵循格式。图片、音频和 Anthropic Messages API 不在此服务范围内。
 

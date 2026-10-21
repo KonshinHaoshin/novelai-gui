@@ -1,0 +1,22 @@
+
+我来帮你分析这台Mac的情况。让我查看一下系统信息和当前环境状况。
+<tool>
+<select>
+<function>
+<name>bash</name>
+<parameter name="command">system_profiler SPHardwareDataType</parameter>
+</function>
+<function>
+<name>bash</name>
+<parameter name="command">system_profiler SPOSDDataType</parameter>
+</function>
+<function>
+<name>bash</name>
+<parameter name="command">df -h</parameter>
+</function>
+<function>
+<name>bash</name>
+<parameter name="command">top -l 1 | head -20</parameter>
+</function>
+</select>
+</tool>

@@ -1,0 +1,13 @@
+
+我来帮您分析这台Mac的情况。让我先查看系统基本信息和硬件配置。
+<bash>
+system_profiler SPHardwareDataType
+</bash><bash>
+system_profiler SPSoftwareDataType
+</bash><bash>
+memory_pressure
+</bash><bash>
+uptime
+</bash><bash>
+df -h
+</bash>
