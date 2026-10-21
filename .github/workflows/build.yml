@@ -90,7 +90,12 @@ jobs:
           retention-days: 14
 
       - name: Build Tauri package
-        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} --ci --no-sign
+        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} --ci
+
+      - name: Verify macOS application signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: codesign --verify --deep --strict --verbose=2 "src-tauri/target/${{ matrix.target }}/release/bundle/macos/NovelAI GUI.app"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
