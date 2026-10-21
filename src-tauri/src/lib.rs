@@ -16,6 +16,8 @@ use tauri_plugin_dialog::DialogExt;
 
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "cli")]
+mod image_metadata;
 pub mod gateway;
 pub mod opencode;
 mod tool_adapter;

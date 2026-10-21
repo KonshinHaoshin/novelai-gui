@@ -205,6 +205,20 @@ npm run cli -- generate --request ./request.json --seed 123 --dry-run
 JSON 也可以包含 `sourceImage`、`maskImage`、参考图等高级字段的 Base64 数据。
 `--dry-run` 和输出记录会省略图像数据；预览是用于检查的摘要，不能直接重放。
 
+## 读取图片 prompt（CLI）
+
+离线读取 PNG / WebP 内嵌的生成信息，无需 Token，不调用生成接口：
+
+```bash
+npm run cli -- metadata "/path/to/image.png"
+npm run cli -- metadata "/path/to/image.png" --prompt-only
+# 独立可执行文件：novelai-cli metadata image.png
+```
+
+默认输出 JSON，包含 `found`、可识别的 `prompt`、`negativePrompt`、seed、步数、采样器等参数，以及 `rawMetadata` 原始元数据。支持 PNG tEXt / zTXt / iTXt、NovelAI PNG 隐写信息（含 gzip）和 WebP EXIF / JSON 元数据。V4 / V5 的 `base_caption` 也可读取。
+
+图片没有 prompt 时，JSON 返回 `found: false`；`--prompt-only` 返回错误和非零退出码。仅能读取图片中保留的信息，无法恢复被平台或截图移除的 prompt。此命令不会自动修改 `generate --image` 的生成参数。
+
 ## 本地 OpenAI 兼容文本 API
 
 在 GUI「设置 → 本地 OpenAI API」中启动服务，默认地址为 `http://127.0.0.1:18765/v1`。

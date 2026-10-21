@@ -748,9 +748,10 @@ function App() {
           }
         });
       }
+      const backendRequest = await buildBackendImageRequest(request, settings);
       const response = await invoke<GenerateImageResponse>(
         useStream ? "generate_image_stream" : "generate_image",
-        { request: buildBackendImageRequest(request, settings) },
+        { request: backendRequest },
       );
       const rawImages = useStream ? response.images.slice(-1) : response.images;
       let displayImages = rawImages;
@@ -4384,6 +4385,43 @@ function imageAssetFromCanvas(canvas: HTMLCanvasElement, name: string): ImageAss
   return { name, mimeType: "image/png", base64: dataUrl.slice(markerIndex + marker.length) };
 }
 
+const DIRECTOR_REFERENCE_CANVASES = [
+  { width: 1024, height: 1536 },
+  { width: 1472, height: 1472 },
+  { width: 1536, height: 1024 },
+] as const;
+
+async function prepareDirectorReferenceImage(asset: ImageAsset): Promise<ImageAsset> {
+  const image = await loadImageElement(asset);
+  if (image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+    throw new Error(`无法读取角色参考图尺寸：${asset.name}`);
+  }
+
+  const aspectRatio = image.naturalWidth / image.naturalHeight;
+  const canvasSize = DIRECTOR_REFERENCE_CANVASES.reduce((closest, candidate) => {
+    const closestDistance = Math.abs(Math.log(aspectRatio / (closest.width / closest.height)));
+    const candidateDistance = Math.abs(Math.log(aspectRatio / (candidate.width / candidate.height)));
+    return candidateDistance < closestDistance ? candidate : closest;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = canvasSize.width;
+  canvas.height = canvasSize.height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("无法准备 NovelAI 角色参考图画布。");
+  }
+
+  const scale = Math.min(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+  const width = image.naturalWidth * scale;
+  const height = image.naturalHeight * scale;
+  context.fillStyle = "#000000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+  return imageAssetFromCanvas(canvas, asset.name);
+}
+
 // 重绘结果在遮罩边缘会带一圈半透明的灰色洞填充残留；用羽化后的遮罩把
 // 原始源图贴回遮罩外的同时，在边界带内与结果图做渐变混合，把残留压掉。
 function featherMaskWeights(mask: ImageData, radius: number): Float32Array {
@@ -4658,7 +4696,14 @@ function buildPayloadPreview(request: ImageRequest) {
   };
 }
 
-function buildBackendImageRequest(request: ImageRequest, settings: AppSettings) {
+async function buildBackendImageRequest(request: ImageRequest, settings: AppSettings) {
+  const directorReferenceImages = await Promise.all(
+    request.directorReferenceImages.map(prepareDirectorReferenceImage),
+  );
+  const directorReferenceImage = directorReferenceImages.length === 0 && request.directorReferenceImage
+    ? await prepareDirectorReferenceImage(request.directorReferenceImage)
+    : undefined;
+
   return {
     ...request,
     prompt: effectivePrompt(request),
@@ -4672,8 +4717,8 @@ function buildBackendImageRequest(request: ImageRequest, settings: AppSettings) 
     referenceImages: request.referenceImages,
     referenceStrengths: request.referenceImages.map(() => request.referenceStrength),
     referenceInformationExtractedMultiple: request.referenceImages.map(() => request.referenceInformationExtracted),
-    directorReferenceImage: request.directorReferenceImage?.base64,
-    directorReferenceImages: request.directorReferenceImages.map((image) => image.base64),
+    directorReferenceImage: directorReferenceImage?.base64,
+    directorReferenceImages: directorReferenceImages.map((image) => image.base64),
   };
 }
 

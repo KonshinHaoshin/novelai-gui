@@ -21,36 +21,72 @@ impl ToolAdapter {
                     .find(&format!("</{name}>"))
                     .ok_or("XML 工具调用未完成。")?;
                 let body = remainder[..end].trim();
-                let call = if !body.is_empty() {
-                    let body: Value =
-                        serde_json::from_str(body).map_err(|_| "XML 工具内容必须为 JSON。")?;
-                    if body.get("arguments").is_some() || body.get("function").is_some() {
-                        body
+                let decode_entities = |raw: &str| {
+                    raw.replace("&quot;", "\"")
+                        .replace("&apos;", "'")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&amp;", "&")
+                };
+                let parameter_value = |key: &str, raw: &str| -> Result<Value, String> {
+                    let raw = raw.trim();
+                    let raw = if let Some(cdata) = raw
+                        .strip_prefix("<![CDATA[")
+                        .and_then(|s| s.strip_suffix("]]>"))
+                    {
+                        cdata.to_string()
                     } else {
-                        json!({"name":name,"arguments":body})
+                        decode_entities(raw)
+                    };
+                    let schema = &tool["function"]["parameters"]["properties"][key];
+                    if schema.is_null() {
+                        return Err(format!("XML 工具 {name} 包含未知参数 {key}。"));
+                    }
+                    if matches!(
+                        schema["type"].as_str(),
+                        Some("number" | "integer" | "boolean" | "object" | "array")
+                    ) {
+                        serde_json::from_str(&raw).map_err(|_| "XML 工具参数类型无效。".into())
+                    } else {
+                        Ok(json!(raw))
+                    }
+                };
+                let call = if let Ok(value) = serde_json::from_str::<Value>(body) {
+                    if value.get("arguments").is_some() || value.get("function").is_some() {
+                        value
+                    } else {
+                        json!({"name":name,"arguments":value})
                     }
                 } else {
                     let mut args = serde_json::Map::new();
                     for capture in attributes.captures_iter(tag.as_str()) {
                         let key = &capture[1];
                         let raw = capture.get(2).or_else(|| capture.get(3)).unwrap().as_str();
-                        let raw = raw
-                            .replace("&quot;", "\"")
-                            .replace("&apos;", "'")
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&amp;", "&");
-                        let kind =
-                            tool["function"]["parameters"]["properties"][key]["type"].as_str();
-                        let value = if matches!(
-                            kind,
-                            Some("number" | "integer" | "boolean" | "object" | "array")
-                        ) {
-                            serde_json::from_str(&raw).map_err(|_| "XML 工具参数类型无效。")?
-                        } else {
-                            json!(raw)
-                        };
-                        args.insert(key.into(), value);
+                        args.insert(key.into(), parameter_value(key, raw)?);
+                    }
+                    if !body.is_empty() {
+                        // Accept named XML parameters, but consume the entire body so
+                        // malformed or extra content cannot be silently discarded.
+                        let opening = regex::Regex::new(
+                            r#"^<([A-Za-z_][A-Za-z0-9_]*)(?:\s+name=["']([^"']+)["'])?\s*>"#,
+                        )
+                        .unwrap();
+                        let mut remaining = body;
+                        while let Some(capture) = opening.captures(remaining) {
+                            let tag_name = &capture[1];
+                            let key = capture.get(2).map(|v| v.as_str()).unwrap_or(tag_name);
+                            let tail = &remaining[capture.get(0).unwrap().end()..];
+                            let closing = format!("</{tag_name}>");
+                            let end = tail.find(&closing).ok_or("XML 工具参数未完成。")?;
+                            if args.contains_key(key) {
+                                return Err("XML 工具参数重复。".into());
+                            }
+                            args.insert(key.into(), parameter_value(key, &tail[..end])?);
+                            remaining = tail[end + closing.len()..].trim();
+                        }
+                        if !remaining.is_empty() {
+                            return Err("XML 工具内容必须为 JSON 或完整的命名参数标签。".into());
+                        }
                     }
                     json!({"name":name,"arguments":args})
                 };
@@ -177,6 +213,7 @@ impl ToolAdapter {
         if trimmed.matches("<novelai_tool_calls>").count() > 1 {
             return Err("模型返回了多个工具调用包，请重试。".into());
         }
+        let generic_marked = trimmed.contains("<tool_call>");
         let candidate = if marked {
             trimmed
                 .split_once("<novelai_tool_calls>")
@@ -184,15 +221,50 @@ impl ToolAdapter {
                 .ok_or("模型返回了不完整的工具调用。")?
         } else {
             trimmed
-                .strip_prefix("```json")
-                .and_then(|s| s.strip_suffix("```"))
-                .unwrap_or(trimmed)
-                .trim()
         };
-        let envelope = match serde_json::from_str::<Value>(candidate).ok() {
-            Some(value) => Some(value),
-            None if !marked => self.xml_calls(trimmed)?,
-            None => None,
+        let parse_json = |body: &str| -> Result<Value, String> {
+            let body = body.trim();
+            let body = body
+                .strip_prefix("```json")
+                .or_else(|| body.strip_prefix("```"))
+                .and_then(|s| s.trim().strip_suffix("```"))
+                .unwrap_or(body)
+                .trim();
+            serde_json::from_str(body).map_err(|_| "模型工具调用不是有效的 JSON。".into())
+        };
+        let normalize = |value: Value| -> Value {
+            if value.is_array() {
+                json!({"tool_calls":value})
+            } else if value.get("name").is_some() || value.pointer("/function/name").is_some() {
+                json!({"tool_calls":[value]})
+            } else {
+                value
+            }
+        };
+        let envelope = if generic_marked && !marked {
+            // Parse every explicit wrapper, preserving order. Never search arbitrary
+            // prose for JSON: examples in normal answers must remain plain text.
+            let mut remaining = trimmed;
+            let mut calls = Vec::new();
+            while let Some((_, tail)) = remaining.split_once("<tool_call>") {
+                let (body, rest) = tail
+                    .split_once("</tool_call>")
+                    .ok_or("模型返回了不完整的工具调用。")?;
+                let value = normalize(parse_json(body)?);
+                let batch = value
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .ok_or("模型工具调用不是有效的 JSON。")?;
+                calls.extend(batch.iter().cloned());
+                remaining = rest;
+            }
+            Some(json!({"tool_calls":calls}))
+        } else {
+            match parse_json(candidate) {
+                Ok(value) => Some(normalize(value)),
+                Err(_) if !marked => self.xml_calls(trimmed)?,
+                Err(error) => return Err(error),
+            }
         };
         let calls = envelope
             .as_ref()
@@ -205,7 +277,7 @@ impl ToolAdapter {
         {
             return Err("模型返回了无法解析的工具格式，请重试。".into());
         }
-        if marked && calls.is_none() {
+        if (marked || generic_marked) && calls.is_none_or(|calls| calls.is_empty()) {
             return Err("模型工具调用不是有效的 JSON。".into());
         }
         if let Some(calls) = calls.filter(|calls| !calls.is_empty()) {
@@ -273,7 +345,7 @@ impl ToolAdapter {
 mod tests {
     use super::*;
     fn request() -> Value {
-        json!({"messages":[{"role":"user","content":"read file"}],"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object","required":["path"]}}}]})
+        json!({"messages":[{"role":"user","content":"read file"}],"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}]})
     }
     #[test]
     fn parses_calls_and_roundtrips_results() {
@@ -302,6 +374,72 @@ mod tests {
             .unwrap()
             .iter()
             .all(|m| m["role"] != "tool"));
+    }
+    #[test]
+    fn parses_json_tool_variants() {
+        let adapter = ToolAdapter::prepare(&mut request()).unwrap().unwrap();
+        let call = json!({"name":"read","arguments":{"path":"/tmp/a"}});
+        let native = json!({"type":"function","function":{"name":"read","arguments":"{\"path\":\"/tmp/a\"}"}});
+        for text in [
+            call.to_string(),
+            native.to_string(),
+            json!([call.clone(), native]).to_string(),
+            format!("```json\n{call}\n```"),
+            format!("```\n{call}\n```"),
+            format!("Reading now. <tool_call>{call}</tool_call>"),
+            format!("<tool_call>{call}</tool_call>\n<tool_call>{call}</tool_call>"),
+        ] {
+            let (reply, finish) = adapter.decode(&text, "stop").unwrap();
+            assert_eq!(finish, "tool_calls", "{text}");
+            assert_eq!(reply["tool_calls"][0]["function"]["name"], "read");
+            assert_eq!(
+                reply["tool_calls"][0]["function"]["arguments"],
+                "{\"path\":\"/tmp/a\"}"
+            );
+        }
+        let prose = format!("Example: {call}");
+        assert_eq!(adapter.decode(&prose, "stop").unwrap().0["content"], prose);
+        for text in [
+            "<tool_call>{</tool_call>",
+            "<tool_call>{}",
+            "<tool_call>[]</tool_call>",
+            "<tool_call>{\"name\":\"bad\",\"arguments\":{}}</tool_call>",
+            "{\"name\":\"read\",\"arguments\":{}}",
+        ] {
+            assert!(adapter.decode(text, "stop").is_err(), "{text}");
+        }
+        assert!(adapter.decode(&call.to_string(), "length").is_err());
+        let mut input = request();
+        input["tool_choice"] = json!("none");
+        let disabled = ToolAdapter::prepare(&mut input).unwrap().unwrap();
+        assert!(disabled.decode(&call.to_string(), "stop").is_err());
+    }
+    #[test]
+    fn parses_named_xml_parameters_without_losing_values() {
+        let mut input = request();
+        input["tools"][0]["function"] = json!({"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"},"description":{"type":"string"},"timeout":{"type":"number"}},"required":["command","description"]}});
+        let adapter = ToolAdapter::prepare(&mut input).unwrap().unwrap();
+        for text in [
+            "<bash><command>uname -a &amp;&amp; sw_vers</command><description>检查系统</description><timeout>1000</timeout></bash>",
+            "<bash><parameter name=\"command\">uname -a &amp;&amp; sw_vers</parameter><parameter name=\"description\">检查系统</parameter><parameter name=\"timeout\">1000</parameter></bash>",
+            "<bash><command><![CDATA[uname -a && sw_vers]]></command><description>检查系统</description><timeout>1000</timeout></bash>",
+        ] {
+            let (reply, finish) = adapter.decode(text, "stop").unwrap();
+            assert_eq!(finish, "tool_calls");
+            let args: Value = serde_json::from_str(reply["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(args, json!({"command":"uname -a && sw_vers","description":"检查系统","timeout":1000}));
+        }
+        for body in [
+            "<command>uname</command>",
+            "<command>uname</command><description>x</description>ignored",
+            "<command>uname</command><command>pwd</command><description>x</description>",
+            "<command>uname</command><description>x</description><timeout>bad</timeout>",
+            "<command>uname</command><description>x</description><unknown>oops</unknown>",
+        ] {
+            assert!(adapter
+                .decode(&format!("<bash>{body}</bash>"), "stop")
+                .is_err());
+        }
     }
     #[test]
     fn rejects_unknown_missing_and_truncated_calls() {

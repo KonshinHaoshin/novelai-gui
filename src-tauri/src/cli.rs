@@ -21,6 +21,14 @@ enum CliCommand {
     GatewayKey,
     /// Generate images, or edit an existing image with an optional mask
     Generate(Box<GenerateArgs>),
+    /// Read embedded prompts and generation parameters from a PNG or WebP (offline)
+    #[command(alias = "inspect")]
+    Metadata {
+        image: PathBuf,
+        /// Print only the positive prompt instead of JSON
+        #[arg(long)]
+        prompt_only: bool,
+    },
     /// Print account data, subscription and Anlas information as JSON
     Account(NetworkArgs),
     /// Browse presets saved by the GUI
@@ -182,6 +190,18 @@ pub async fn run() -> Result<(), String> {
             tokio::signal::ctrl_c().await.map_err(to_error)?;
             server.stop().await;
             Ok(())
+        }
+        CliCommand::Metadata { image, prompt_only } => {
+            let metadata = crate::image_metadata::read(&image)?;
+            if prompt_only {
+                println!(
+                    "{}",
+                    metadata["prompt"].as_str().ok_or("图片中未找到 prompt。")?
+                );
+                Ok(())
+            } else {
+                print_json(&metadata)
+            }
         }
         CliCommand::GatewayKey => {
             println!("{}", gateway::get_gateway_key()?);
