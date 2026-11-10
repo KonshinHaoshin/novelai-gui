@@ -4,12 +4,13 @@ use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_dialog::DialogExt;
@@ -267,25 +268,63 @@ pub struct ImageAssetResponse {
     pub base64: String,
 }
 
-#[tauri::command]
-fn has_api_token() -> Result<bool, String> {
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
-    match entry.get_password() {
-        Ok(token) => Ok(!token.trim().is_empty()),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(err) => Err(to_error(err)),
+fn token_cache() -> &'static Mutex<Option<String>> {
+    static CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_token() -> Option<String> {
+    token_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.clone())
+        .filter(|token| !token.trim().is_empty())
+}
+
+fn remember_token(token: &str) {
+    if let Ok(mut cache) = token_cache().lock() {
+        *cache = Some(token.to_string());
     }
 }
 
 #[tauri::command]
-fn save_api_token(token: String) -> Result<(), String> {
+async fn has_api_token() -> Result<bool, String> {
+    if cached_token().is_some() {
+        return Ok(true);
+    }
+
+    tokio::task::spawn_blocking(|| {
+        let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
+        match entry.get_password() {
+            Ok(token) if !token.trim().is_empty() => {
+                remember_token(&token);
+                Ok(true)
+            }
+            Ok(_) | Err(keyring::Error::NoEntry) => Ok(false),
+            Err(err) => Err(to_error(err)),
+        }
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[tauri::command]
+async fn save_api_token(token: String) -> Result<(), String> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
         return Err("API Token cannot be empty".to_string());
     }
 
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
-    entry.set_password(trimmed).map_err(to_error)
+    let value = trimmed.to_string();
+    tokio::task::spawn_blocking(move || {
+        let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
+        entry.set_password(&value).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)??;
+
+    remember_token(trimmed);
+    Ok(())
 }
 
 fn shared_presets_path() -> Result<PathBuf, String> {
@@ -297,38 +336,47 @@ fn shared_presets_path() -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn load_shared_presets() -> Result<Option<Vec<SharedPreset>>, String> {
-    let path = shared_presets_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
+async fn load_shared_presets() -> Result<Option<Vec<SharedPreset>>, String> {
+    tokio::task::spawn_blocking(|| {
+        let path = shared_presets_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
 
-    let contents = fs::read_to_string(path).map_err(to_error)?;
-    let value: serde_json::Value = serde_json::from_str(&contents).map_err(to_error)?;
-    if let Some(document) = value.as_object() {
-        let document: SharedPresetDocument =
-            serde_json::from_value(serde_json::Value::Object(document.clone()))
-                .map_err(to_error)?;
-        return Ok(Some(document.presets));
-    }
+        let contents = fs::read_to_string(path).map_err(to_error)?;
+        let value: serde_json::Value = serde_json::from_str(&contents).map_err(to_error)?;
+        if let Some(document) = value.as_object() {
+            let document: SharedPresetDocument =
+                serde_json::from_value(serde_json::Value::Object(document.clone()))
+                    .map_err(to_error)?;
+            return Ok(Some(document.presets));
+        }
 
-    // Accept an older/simple array export as well, so a hand-copied preset
-    // file can be imported without a one-off migration.
-    let presets: Vec<SharedPreset> = serde_json::from_value(value).map_err(to_error)?;
-    Ok(Some(presets))
+        // Accept an older/simple array export as well, so a hand-copied preset
+        // file can be imported without a one-off migration.
+        let presets: Vec<SharedPreset> = serde_json::from_value(value).map_err(to_error)?;
+        Ok(Some(presets))
+    })
+    .await
+    .map_err(to_error)?
 }
 
 #[tauri::command]
-fn save_shared_presets(presets: Vec<SharedPreset>) -> Result<(), String> {
-    let path = shared_presets_path()?;
-    let temporary_path = path.with_file_name(format!(".shared-presets.{}.tmp", std::process::id()));
-    let document = SharedPresetDocument {
-        version: 1,
-        presets,
-    };
-    let contents = serde_json::to_vec_pretty(&document).map_err(to_error)?;
-    fs::write(&temporary_path, contents).map_err(to_error)?;
-    fs::rename(&temporary_path, &path).map_err(to_error)
+async fn save_shared_presets(presets: Vec<SharedPreset>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let path = shared_presets_path()?;
+        let temporary_path =
+            path.with_file_name(format!(".shared-presets.{}.tmp", std::process::id()));
+        let document = SharedPresetDocument {
+            version: 1,
+            presets,
+        };
+        let contents = serde_json::to_vec_pretty(&document).map_err(to_error)?;
+        fs::write(&temporary_path, contents).map_err(to_error)?;
+        fs::rename(&temporary_path, &path).map_err(to_error)
+    })
+    .await
+    .map_err(to_error)?
 }
 
 fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Result<Value, String> {
@@ -1070,13 +1118,12 @@ async fn account_status_with_token(
     token: &str,
 ) -> Result<serde_json::Value, String> {
     let client = api_client(allow_invalid_tls, proxy_url)?;
-    let data = get_json(&client, token, USER_DATA_URL, proxy_url).await?;
-    let information = get_json(&client, token, USER_INFORMATION_URL, proxy_url)
-        .await
-        .ok();
-    let subscription = get_json(&client, token, USER_SUBSCRIPTION_URL, proxy_url)
-        .await
-        .ok();
+    let (data, information, subscription) = tokio::join!(
+        get_json(&client, token, USER_DATA_URL, proxy_url),
+        get_json(&client, token, USER_INFORMATION_URL, proxy_url),
+        get_json(&client, token, USER_SUBSCRIPTION_URL, proxy_url),
+    );
+    let data = data?;
 
     Ok(serde_json::json!({
         "data": data,
@@ -1203,8 +1250,13 @@ async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn read_image_file(path: String) -> Result<ImageAssetResponse, String> {
-    let path = PathBuf::from(path.trim());
+async fn read_image_file(path: String) -> Result<ImageAssetResponse, String> {
+    tokio::task::spawn_blocking(move || read_image_file_sync(PathBuf::from(path.trim())))
+        .await
+        .map_err(to_error)?
+}
+
+fn read_image_file_sync(path: PathBuf) -> Result<ImageAssetResponse, String> {
     if !path.is_file() {
         return Err("拖入的图片文件不存在。".to_string());
     }
@@ -1237,14 +1289,7 @@ fn read_image_file(path: String) -> Result<ImageAssetResponse, String> {
     })
 }
 
-#[tauri::command]
-fn save_generated_image(
-    file_name: String,
-    base64: String,
-    save_directory: Option<String>,
-) -> Result<String, String> {
-    let bytes = BASE64.decode(base64).map_err(to_error)?;
-    let safe_name = sanitize_file_name(&file_name);
+fn save_target_directory(save_directory: Option<String>) -> Result<PathBuf, String> {
     let dir = save_directory
         .as_deref()
         .map(str::trim)
@@ -1252,8 +1297,12 @@ fn save_generated_image(
         .map(PathBuf::from)
         .unwrap_or_else(default_save_directory);
     fs::create_dir_all(&dir).map_err(to_error)?;
+    Ok(dir)
+}
 
-    let requested = Path::new(&safe_name);
+/// Reserve a file name that does not collide with an existing one.
+fn create_unique_file(dir: &Path, safe_name: &str) -> Result<(PathBuf, fs::File), String> {
+    let requested = Path::new(safe_name);
     let stem = requested
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1264,27 +1313,140 @@ fn save_generated_image(
 
     loop {
         let candidate = if suffix == 0 {
-            safe_name.clone()
+            safe_name.to_string()
         } else if let Some(extension) = extension {
             format!("{stem} ({suffix}).{extension}")
         } else {
             format!("{stem} ({suffix})")
         };
         let path = dir.join(candidate);
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 suffix = suffix
                     .checked_add(1)
                     .ok_or_else(|| "没有可用的图片文件名".to_string())?;
-                continue;
             }
             Err(error) => return Err(format!("{}: {error}", path.display())),
-        };
+        }
+    }
+}
+
+#[tauri::command]
+async fn save_generated_image(
+    file_name: String,
+    base64: String,
+    save_directory: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let bytes = BASE64.decode(base64).map_err(to_error)?;
+        let dir = save_target_directory(save_directory)?;
+        let (path, mut file) = create_unique_file(&dir, &sanitize_file_name(&file_name))?;
         file.write_all(&bytes)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        return Ok(path.to_string_lossy().to_string());
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(to_error)?
+}
+
+/// Copy an already persisted image instead of shipping its bytes through IPC.
+#[tauri::command]
+async fn save_persisted_image(
+    source_path: String,
+    file_name: String,
+    save_directory: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let source = PathBuf::from(source_path.trim());
+        if !source.is_file() {
+            return Err("缓存图片不存在，请重新生成后再保存。".to_string());
+        }
+
+        let dir = save_target_directory(save_directory)?;
+        let (path, mut target) = create_unique_file(&dir, &sanitize_file_name(&file_name))?;
+        let mut reader =
+            fs::File::open(&source).map_err(|error| format!("{}: {error}", source.display()))?;
+        std::io::copy(&mut reader, &mut target)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(to_error)?
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedImage {
+    pub path: String,
+    pub byte_len: u64,
+}
+
+fn generated_cache_dir() -> PathBuf {
+    let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    dir.push("novelai-gui");
+    dir.push("generated");
+    dir
+}
+
+/// Keep the generated-image cache bounded; history only references recent entries.
+fn prune_generated_cache(keep: usize) {
+    let root = generated_cache_dir();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+
+    let mut batches: Vec<(u128, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            name.parse::<u128>()
+                .ok()
+                .map(|stamp| (stamp, entry.path()))
+        })
+        .collect();
+
+    if batches.len() <= keep {
+        return;
     }
+
+    batches.sort_by_key(|(stamp, _)| *stamp);
+    let stale = batches.len() - keep;
+    for (_, path) in batches.into_iter().take(stale) {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+/// Write a freshly generated image to the local cache so the UI can reference a
+/// path instead of holding the whole image in memory.
+#[tauri::command]
+async fn persist_generated_image(
+    file_name: String,
+    base64: String,
+) -> Result<PersistedImage, String> {
+    tokio::task::spawn_blocking(move || {
+        let bytes = BASE64.decode(base64).map_err(to_error)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(to_error)?
+            .as_millis();
+        let mut dir = generated_cache_dir();
+        dir.push(stamp.to_string());
+        fs::create_dir_all(&dir).map_err(to_error)?;
+        let (path, mut file) = create_unique_file(&dir, &sanitize_file_name(&file_name))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+
+        prune_generated_cache(50);
+
+        Ok(PersistedImage {
+            path: path.to_string_lossy().to_string(),
+            byte_len: bytes.len() as u64,
+        })
+    })
+    .await
+    .map_err(to_error)?
 }
 
 #[tauri::command]
@@ -1304,7 +1466,13 @@ async fn pick_save_directory(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn reveal_in_finder(path: String) -> Result<(), String> {
+async fn reveal_in_finder(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || reveal_in_finder_sync(path))
+        .await
+        .map_err(to_error)?
+}
+
+fn reveal_in_finder_sync(path: String) -> Result<(), String> {
     let target = PathBuf::from(path.trim());
     if !target.is_file() {
         return Err("图片文件不存在，请先重新保存图片。".to_string());
@@ -1345,31 +1513,35 @@ fn default_save_directory() -> PathBuf {
 }
 
 #[tauri::command]
-fn append_app_log(level: String, source: String, message: String) -> Result<String, String> {
-    let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push("novelai-gui");
-    dir.push("logs");
-    fs::create_dir_all(&dir).map_err(to_error)?;
+async fn append_app_log(level: String, source: String, message: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+        dir.push("novelai-gui");
+        dir.push("logs");
+        fs::create_dir_all(&dir).map_err(to_error)?;
 
-    let mut file_path = dir;
-    file_path.push("novelai-gui.log.txt");
+        let mut file_path = dir;
+        file_path.push("novelai-gui.log.txt");
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(to_error)?
-        .as_secs();
-    let level = sanitize_log_field(&level).to_ascii_uppercase();
-    let source = sanitize_log_field(&source);
-    let message = sanitize_log_message(&message);
-    let line = format!("[{timestamp}] [{level}] [{source}] {message}\n");
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(to_error)?
+            .as_secs();
+        let level = sanitize_log_field(&level).to_ascii_uppercase();
+        let source = sanitize_log_field(&source);
+        let message = sanitize_log_message(&message);
+        let line = format!("[{timestamp}] [{level}] [{source}] {message}\n");
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file_path)
-        .map_err(to_error)?;
-    file.write_all(line.as_bytes()).map_err(to_error)?;
-    Ok(file_path.to_string_lossy().to_string())
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .map_err(to_error)?;
+        file.write_all(line.as_bytes()).map_err(to_error)?;
+        Ok(file_path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(to_error)?
 }
 
 fn diagnostic_extension(mime_type: &str) -> &'static str {
@@ -1393,7 +1565,13 @@ fn write_diagnostic_image(
 }
 
 #[tauri::command]
-fn save_inpaint_diagnostics(diagnostic: InpaintDiagnostic) -> Result<String, String> {
+async fn save_inpaint_diagnostics(diagnostic: InpaintDiagnostic) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || save_inpaint_diagnostics_sync(diagnostic))
+        .await
+        .map_err(to_error)?
+}
+
+fn save_inpaint_diagnostics_sync(diagnostic: InpaintDiagnostic) -> Result<String, String> {
     if diagnostic.raw_images.len() != diagnostic.composited_images.len() {
         return Err("局部重绘诊断图数量不匹配".to_string());
     }
@@ -1458,9 +1636,16 @@ fn save_inpaint_diagnostics(diagnostic: InpaintDiagnostic) -> Result<String, Str
 }
 
 fn read_token() -> Result<String, String> {
+    if let Some(token) = cached_token() {
+        return Ok(token);
+    }
+
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
     match entry.get_password() {
-        Ok(token) if !token.trim().is_empty() => Ok(token),
+        Ok(token) if !token.trim().is_empty() => {
+            remember_token(&token);
+            Ok(token)
+        }
         Ok(_) | Err(keyring::Error::NoEntry) => Err("API Token is not configured".to_string()),
         Err(err) => Err(to_error(err)),
     }
@@ -1529,11 +1714,36 @@ async fn post_zip_like(
 }
 
 fn api_client(allow_invalid_tls: bool, proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    type ClientKey = (bool, Option<String>);
+    static CACHE: OnceLock<Mutex<HashMap<ClientKey, reqwest::Client>>> = OnceLock::new();
+
+    let proxy = proxy_url
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string);
+    let key: ClientKey = (allow_invalid_tls, proxy.clone());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(cache) = cache.lock() {
+        if let Some(client) = cache.get(&key) {
+            return Ok(client.clone());
+        }
+    }
+
     let mut builder = reqwest::Client::builder().danger_accept_invalid_certs(allow_invalid_tls);
-    if let Some(url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
+    if let Some(url) = proxy.as_deref() {
         builder = builder.proxy(reqwest::Proxy::all(url).map_err(to_error)?);
     }
-    builder.build().map_err(to_error)
+    let client = builder.build().map_err(to_error)?;
+
+    if let Ok(mut cache) = cache.lock() {
+        // Users may probe several proxy addresses; keep the cache bounded.
+        if cache.len() >= 8 {
+            cache.clear();
+        }
+        cache.insert(key, client.clone());
+    }
+    Ok(client)
 }
 
 fn build_character_captions(characters: &[CharacterPrompt]) -> Vec<CharacterCaptionPayload> {
@@ -1682,7 +1892,11 @@ fn decode_stream_image(encoded: &str, index: usize, seed: Option<u64>) -> Option
     } else {
         (String::new(), encoded)
     };
-    let bytes = BASE64.decode(payload.replace(['\n', '\r', ' '], "")).ok()?;
+    let cleaned: String = payload
+        .chars()
+        .filter(|character| !matches!(character, '\n' | '\r' | ' '))
+        .collect();
+    let bytes = BASE64.decode(&cleaned).ok()?;
     let mime_type = if mime_type.is_empty() {
         mime_from_bytes(&bytes)?.to_string()
     } else {
@@ -1692,7 +1906,7 @@ fn decode_stream_image(encoded: &str, index: usize, seed: Option<u64>) -> Option
         file_name: default_file_name(&mime_type, index),
         mime_type,
         byte_len: bytes.len(),
-        base64: BASE64.encode(bytes),
+        base64: cleaned,
         index: Some(index as u32),
         seed,
     })
@@ -1763,12 +1977,14 @@ fn decode_json_images(value: &serde_json::Value) -> Result<Vec<GeneratedImage>, 
         } else {
             ("image/png".to_string(), encoded)
         };
+        // Keep the payload as-is: decoding only validates it and measures the
+        // decoded size, re-encoding it would be a wasted full pass over the image.
         let bytes = BASE64.decode(payload).map_err(to_error)?;
         images.push(GeneratedImage {
             file_name: default_file_name(&mime_type, index),
             mime_type,
             byte_len: bytes.len(),
-            base64: BASE64.encode(bytes),
+            base64: payload.to_string(),
             index: entry
                 .get("index")
                 .and_then(serde_json::Value::as_u64)
@@ -2016,6 +2232,8 @@ pub fn run() {
             encode_vibe,
             read_image_file,
             save_generated_image,
+            save_persisted_image,
+            persist_generated_image,
             pick_save_directory,
             reveal_in_finder,
             append_app_log,

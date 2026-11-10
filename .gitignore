@@ -42,3 +42,11 @@ test-results/
 
 # Default CLI image output
 /outputs/
+
+# Local build toolchain and caches (Windows sandbox workaround)
+/.tmp/
+/.rust/
+/.mingw/
+/.npm-cache/
+/.vs/
+/release/

@@ -232,7 +232,7 @@ pub async fn run() -> Result<(), String> {
             TokenCommand::Status => print_json(&serde_json::json!({
                 "environmentToken": std::env::var("NOVELAI_API_TOKEN")
                     .map(|token| !token.trim().is_empty()).unwrap_or(false),
-                "savedToken": has_api_token()?,
+                "savedToken": has_api_token().await?,
             })),
             TokenCommand::Set { stdin } => {
                 let token = if stdin {
@@ -245,7 +245,7 @@ pub async fn run() -> Result<(), String> {
                     std::env::var("NOVELAI_API_TOKEN")
                         .map_err(|_| "Set NOVELAI_API_TOKEN or use token set --stdin".to_string())?
                 };
-                save_api_token(token)?;
+                save_api_token(token).await?;
                 print_json(&serde_json::json!({ "saved": true }))
             }
         },
