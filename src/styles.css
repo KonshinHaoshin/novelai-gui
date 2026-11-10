@@ -3810,3 +3810,34 @@ input[type="range"]::-webkit-slider-thumb {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Virtualised history gallery: the scroll container owns the viewport and only
+   the rows near it are mounted. Row height must match GALLERY_ROW_HEIGHT. */
+.virtual-grid-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.virtual-grid-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.virtual-grid-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  will-change: transform;
+}
+
+.virtual-grid-cell {
+  display: flex;
+  min-width: 0;
+}
+
+.virtual-grid-cell > .favorite-card {
+  width: 100%;
+}
