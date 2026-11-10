@@ -17,9 +17,9 @@ use tauri_plugin_dialog::DialogExt;
 
 #[cfg(feature = "cli")]
 pub mod cli;
+pub mod gateway;
 #[cfg(feature = "cli")]
 mod image_metadata;
-pub mod gateway;
 pub mod opencode;
 mod tool_adapter;
 
@@ -288,12 +288,12 @@ fn remember_token(token: &str) {
 }
 
 #[tauri::command]
-async fn has_api_token() -> Result<bool, String> {
+async fn has_api_token() -> Result<bool, AppError> {
     if cached_token().is_some() {
         return Ok(true);
     }
 
-    tokio::task::spawn_blocking(|| {
+    tokio::task::spawn_blocking(|| -> Result<bool, String> {
         let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
         match entry.get_password() {
             Ok(token) if !token.trim().is_empty() => {
@@ -306,17 +306,18 @@ async fn has_api_token() -> Result<bool, String> {
     })
     .await
     .map_err(to_error)?
+    .map_err(AppError::from)
 }
 
 #[tauri::command]
-async fn save_api_token(token: String) -> Result<(), String> {
+async fn save_api_token(token: String) -> Result<(), AppError> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
-        return Err("API Token cannot be empty".to_string());
+        return Err("API Token cannot be empty".to_string().into());
     }
 
     let value = trimmed.to_string();
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
         let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
         entry.set_password(&value).map_err(to_error)
     })
@@ -336,8 +337,8 @@ fn shared_presets_path() -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-async fn load_shared_presets() -> Result<Option<Vec<SharedPreset>>, String> {
-    tokio::task::spawn_blocking(|| {
+async fn load_shared_presets() -> Result<Option<Vec<SharedPreset>>, AppError> {
+    tokio::task::spawn_blocking(|| -> Result<Option<Vec<SharedPreset>>, String> {
         let path = shared_presets_path()?;
         if !path.exists() {
             return Ok(None);
@@ -359,11 +360,12 @@ async fn load_shared_presets() -> Result<Option<Vec<SharedPreset>>, String> {
     })
     .await
     .map_err(to_error)?
+    .map_err(AppError::from)
 }
 
 #[tauri::command]
-async fn save_shared_presets(presets: Vec<SharedPreset>) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
+async fn save_shared_presets(presets: Vec<SharedPreset>) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
         let path = shared_presets_path()?;
         let temporary_path =
             path.with_file_name(format!(".shared-presets.{}.tmp", std::process::id()));
@@ -377,6 +379,7 @@ async fn save_shared_presets(presets: Vec<SharedPreset>) -> Result<(), String> {
     })
     .await
     .map_err(to_error)?
+    .map_err(AppError::from)
 }
 
 fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Result<Value, String> {
@@ -629,7 +632,7 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
 }
 
 #[tauri::command]
-async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageResponse, String> {
+async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageResponse, AppError> {
     let token = read_token()?;
     generate_image_with_token(request, &token).await
 }
@@ -637,7 +640,7 @@ async fn generate_image(request: ImageGenerateRequest) -> Result<GenerateImageRe
 async fn generate_image_with_token(
     request: ImageGenerateRequest,
     token: &str,
-) -> Result<GenerateImageResponse, String> {
+) -> Result<GenerateImageResponse, AppError> {
     let payload = build_image_payload(&request, false)?;
     post_zip_like(
         GENERATE_IMAGE_URL,
@@ -712,7 +715,7 @@ fn emit_image_stream_event(
 async fn generate_image_stream(
     app: AppHandle,
     request: ImageGenerateRequest,
-) -> Result<GenerateImageResponse, String> {
+) -> Result<GenerateImageResponse, AppError> {
     let token = read_token()?;
     let payload = build_image_payload(&request, true)?;
     let client = api_client(request.allow_invalid_tls, request.proxy_url.as_deref())?;
@@ -796,7 +799,7 @@ async fn generate_image_stream(
     }
 
     if images.is_empty() {
-        return Err("NovelAI 流式响应未包含可识别的图片。".to_string());
+        return Err("NovelAI 流式响应未包含可识别的图片。".to_string().into());
     }
     emit_image_stream_event(
         &app,
@@ -814,7 +817,7 @@ async fn generate_image_stream(
 async fn get_story_models(
     allow_invalid_tls: bool,
     proxy_url: Option<String>,
-) -> Result<Vec<StoryModel>, String> {
+) -> Result<Vec<StoryModel>, AppError> {
     let token = read_token()?;
     let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
     let response = client
@@ -861,7 +864,7 @@ async fn get_story_models(
     });
     models.dedup_by(|left, right| left.id == right.id);
     if models.is_empty() {
-        return Err("NovelAI 没有返回可用的文本模型。".to_string());
+        return Err("NovelAI 没有返回可用的文本模型。".to_string().into());
     }
     Ok(models)
 }
@@ -870,10 +873,10 @@ async fn get_story_models(
 async fn generate_story_text(
     app: AppHandle,
     request: StoryGenerateRequest,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let model = request.model.trim();
     if model.is_empty() {
-        return Err("请先选择文本模型。".to_string());
+        return Err("请先选择文本模型。".to_string().into());
     }
     if request.messages.is_empty()
         || request
@@ -881,13 +884,15 @@ async fn generate_story_text(
             .iter()
             .any(|message| !matches!(message.role.as_str(), "system" | "user" | "assistant"))
     {
-        return Err("NovelAI 写作请求缺少有效的上下文消息。".to_string());
+        return Err("NovelAI 写作请求缺少有效的上下文消息。".to_string().into());
     }
     if request.max_tokens == 0 || request.max_tokens > 8192 {
-        return Err("单次续写长度须在 1 到 8192 tokens 之间。".to_string());
+        return Err("单次续写长度须在 1 到 8192 tokens 之间。"
+            .to_string()
+            .into());
     }
     if !request.temperature.is_finite() || !(0.0..=2.0).contains(&request.temperature) {
-        return Err("Temperature 须在 0 到 2 之间。".to_string());
+        return Err("Temperature 须在 0 到 2 之间。".to_string().into());
     }
 
     let token = read_token()?;
@@ -904,7 +909,9 @@ async fn generate_story_text(
             .collect::<Vec<_>>()
             .join("\n\n");
         if input.chars().count() > 40_000 {
-            return Err("Kayra / Erato 的输入长度不能超过 40,000 个字符。".to_string());
+            return Err("Kayra / Erato 的输入长度不能超过 40,000 个字符。"
+                .to_string()
+                .into());
         }
         let payload = serde_json::json!({
             "input": input,
@@ -935,7 +942,7 @@ async fn generate_story_text(
             .ok_or_else(|| "NovelAI 经典文本接口没有返回正文。".to_string())?
             .to_string();
         if output.trim().is_empty() {
-            return Err("NovelAI 文本模型没有返回正文。".to_string());
+            return Err("NovelAI 文本模型没有返回正文。".to_string().into());
         }
         emit_story_generation_event(
             &app,
@@ -1015,7 +1022,7 @@ async fn generate_story_text(
     )?;
 
     if output.trim().is_empty() {
-        return Err("NovelAI 文本模型没有返回正文。".to_string());
+        return Err("NovelAI 文本模型没有返回正文。".to_string().into());
     }
     emit_story_generation_event(&app, &request.request_id, "complete", None, None);
     Ok(output)
@@ -1038,7 +1045,7 @@ fn process_story_stream_event(
             .as_str()
             .or_else(|| error.get("message").and_then(serde_json::Value::as_str))
             .unwrap_or("NovelAI 文本生成返回错误。");
-        return Err(message.to_string());
+        return Err(message.to_string().into());
     }
 
     let content = value
@@ -1083,7 +1090,7 @@ async fn export_novel_text(
     app: AppHandle,
     file_name: String,
     content: String,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, AppError> {
     let safe_name = sanitize_file_name(&file_name);
     let (tx, rx) = tokio::sync::oneshot::channel::<Option<PathBuf>>();
     app.dialog()
@@ -1107,7 +1114,7 @@ async fn export_novel_text(
 async fn get_account_status(
     allow_invalid_tls: bool,
     proxy_url: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let token = read_token()?;
     account_status_with_token(allow_invalid_tls, proxy_url.as_deref(), &token).await
 }
@@ -1116,7 +1123,7 @@ async fn account_status_with_token(
     allow_invalid_tls: bool,
     proxy_url: Option<&str>,
     token: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let client = api_client(allow_invalid_tls, proxy_url)?;
     let (data, information, subscription) = tokio::join!(
         get_json(&client, token, USER_DATA_URL, proxy_url),
@@ -1139,7 +1146,7 @@ async fn suggest_tags(
     lang: Option<String>,
     allow_invalid_tls: bool,
     proxy_url: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let token = read_token()?;
     let client = api_client(allow_invalid_tls, proxy_url.as_deref())?;
     let response = client
@@ -1158,12 +1165,12 @@ async fn suggest_tags(
 }
 
 #[tauri::command]
-async fn upscale_image(request: UpscaleImageRequest) -> Result<GenerateImageResponse, String> {
+async fn upscale_image(request: UpscaleImageRequest) -> Result<GenerateImageResponse, AppError> {
     if request.image.trim().is_empty() {
-        return Err("Upscale image cannot be empty".to_string());
+        return Err("Upscale image cannot be empty".to_string().into());
     }
     if request.model.trim().is_empty() {
-        return Err("Upscale model cannot be empty".to_string());
+        return Err("Upscale model cannot be empty".to_string().into());
     }
     if let Some(sigma) = request.declared_blur_sigma {
         const ALLOWED_SIGMAS: [f32; 6] = [0.0, 0.30, 0.35, 0.40, 0.45, 0.50];
@@ -1172,9 +1179,10 @@ async fn upscale_image(request: UpscaleImageRequest) -> Result<GenerateImageResp
                 .iter()
                 .any(|allowed| (sigma - allowed).abs() < f32::EPSILON)
         {
-            return Err(
-                "declared_blur_sigma must be one of 0, 0.30, 0.35, 0.40, 0.45 or 0.50".to_string(),
-            );
+            return Err(AppError::new(
+                "invalid_request",
+                "declared_blur_sigma must be one of 0, 0.30, 0.35, 0.40, 0.45 or 0.50",
+            ));
         }
     }
 
@@ -1197,7 +1205,7 @@ async fn upscale_image(request: UpscaleImageRequest) -> Result<GenerateImageResp
 }
 
 #[tauri::command]
-async fn augment_image(request: AugmentImageRequest) -> Result<GenerateImageResponse, String> {
+async fn augment_image(request: AugmentImageRequest) -> Result<GenerateImageResponse, AppError> {
     let token = read_token()?;
     let payload = serde_json::json!({
         "image": request.image,
@@ -1218,7 +1226,7 @@ async fn augment_image(request: AugmentImageRequest) -> Result<GenerateImageResp
 }
 
 #[tauri::command]
-async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, String> {
+async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, AppError> {
     let token = read_token()?;
     let payload = serde_json::json!({
         "image": request.image,
@@ -1250,15 +1258,16 @@ async fn encode_vibe(request: EncodeVibeRequest) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn read_image_file(path: String) -> Result<ImageAssetResponse, String> {
+async fn read_image_file(path: String) -> Result<ImageAssetResponse, AppError> {
     tokio::task::spawn_blocking(move || read_image_file_sync(PathBuf::from(path.trim())))
         .await
         .map_err(to_error)?
+        .map_err(AppError::from)
 }
 
 fn read_image_file_sync(path: PathBuf) -> Result<ImageAssetResponse, String> {
     if !path.is_file() {
-        return Err("拖入的图片文件不存在。".to_string());
+        return Err("拖入的图片文件不存在。".to_string().into());
     }
 
     let mime_type = match path
@@ -1273,7 +1282,11 @@ fn read_image_file_sync(path: PathBuf) -> Result<ImageAssetResponse, String> {
         "webp" => "image/webp",
         "bmp" => "image/bmp",
         "gif" => "image/gif",
-        _ => return Err("仅支持 PNG、JPG、WEBP、BMP 或 GIF 图片。".to_string()),
+        _ => {
+            return Err("仅支持 PNG、JPG、WEBP、BMP 或 GIF 图片。"
+                .to_string()
+                .into())
+        }
     };
     let name = path
         .file_name()
@@ -1337,8 +1350,8 @@ async fn save_generated_image(
     file_name: String,
     base64: String,
     save_directory: Option<String>,
-) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
+) -> Result<String, AppError> {
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
         let bytes = BASE64.decode(base64).map_err(to_error)?;
         let dir = save_target_directory(save_directory)?;
         let (path, mut file) = create_unique_file(&dir, &sanitize_file_name(&file_name))?;
@@ -1348,6 +1361,7 @@ async fn save_generated_image(
     })
     .await
     .map_err(to_error)?
+    .map_err(AppError::from)
 }
 
 /// Copy an already persisted image instead of shipping its bytes through IPC.
@@ -1356,11 +1370,11 @@ async fn save_persisted_image(
     source_path: String,
     file_name: String,
     save_directory: Option<String>,
-) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
+) -> Result<String, AppError> {
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
         let source = PathBuf::from(source_path.trim());
         if !source.is_file() {
-            return Err("缓存图片不存在，请重新生成后再保存。".to_string());
+            return Err("缓存图片不存在，请重新生成后再保存。".to_string().into());
         }
 
         let dir = save_target_directory(save_directory)?;
@@ -1373,6 +1387,7 @@ async fn save_persisted_image(
     })
     .await
     .map_err(to_error)?
+    .map_err(AppError::from)
 }
 
 #[derive(Debug, Serialize)]
@@ -1401,9 +1416,7 @@ fn prune_generated_cache(keep: usize) {
         .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            name.parse::<u128>()
-                .ok()
-                .map(|stamp| (stamp, entry.path()))
+            name.parse::<u128>().ok().map(|stamp| (stamp, entry.path()))
         })
         .collect();
 
@@ -1424,8 +1437,8 @@ fn prune_generated_cache(keep: usize) {
 async fn persist_generated_image(
     file_name: String,
     base64: String,
-) -> Result<PersistedImage, String> {
-    tokio::task::spawn_blocking(move || {
+) -> Result<PersistedImage, AppError> {
+    tokio::task::spawn_blocking(move || -> Result<PersistedImage, String> {
         let bytes = BASE64.decode(base64).map_err(to_error)?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1447,10 +1460,11 @@ async fn persist_generated_image(
     })
     .await
     .map_err(to_error)?
+    .map_err(AppError::from)
 }
 
 #[tauri::command]
-async fn pick_save_directory(app: AppHandle) -> Result<Option<String>, String> {
+async fn pick_save_directory(app: AppHandle) -> Result<Option<String>, AppError> {
     let default = default_save_directory();
     let (tx, rx) = tokio::sync::oneshot::channel::<Option<PathBuf>>();
     app.dialog()
@@ -1466,16 +1480,17 @@ async fn pick_save_directory(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn reveal_in_finder(path: String) -> Result<(), String> {
+async fn reveal_in_finder(path: String) -> Result<(), AppError> {
     tokio::task::spawn_blocking(move || reveal_in_finder_sync(path))
         .await
         .map_err(to_error)?
+        .map_err(AppError::from)
 }
 
 fn reveal_in_finder_sync(path: String) -> Result<(), String> {
     let target = PathBuf::from(path.trim());
     if !target.is_file() {
-        return Err("图片文件不存在，请先重新保存图片。".to_string());
+        return Err("图片文件不存在，请先重新保存图片。".to_string().into());
     }
 
     let target_string = target.to_string_lossy().to_string();
@@ -1512,17 +1527,43 @@ fn default_save_directory() -> PathBuf {
     dir
 }
 
-#[tauri::command]
-async fn append_app_log(level: String, source: String, message: String) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-        dir.push("novelai-gui");
-        dir.push("logs");
+static LOG_WRITER: OnceLock<Mutex<Option<fs::File>>> = OnceLock::new();
+
+fn append_log_line(line: &str) -> Result<String, String> {
+    let mut dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    dir.push("novelai-gui");
+    dir.push("logs");
+    let file_path = dir.join("novelai-gui.log.txt");
+
+    let mutex = LOG_WRITER.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|_| "日志写入锁不可用".to_string())?;
+
+    if guard.is_none() {
         fs::create_dir_all(&dir).map_err(to_error)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .map_err(to_error)?;
+        *guard = Some(file);
+    }
 
-        let mut file_path = dir;
-        file_path.push("novelai-gui.log.txt");
+    guard
+        .as_mut()
+        .expect("log writer initialised above")
+        .write_all(line.as_bytes())
+        .map_err(to_error)?;
 
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn append_app_log(
+    level: String,
+    source: String,
+    message: String,
+) -> Result<String, AppError> {
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(to_error)?
@@ -1531,17 +1572,11 @@ async fn append_app_log(level: String, source: String, message: String) -> Resul
         let source = sanitize_log_field(&source);
         let message = sanitize_log_message(&message);
         let line = format!("[{timestamp}] [{level}] [{source}] {message}\n");
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .map_err(to_error)?;
-        file.write_all(line.as_bytes()).map_err(to_error)?;
-        Ok(file_path.to_string_lossy().to_string())
+        append_log_line(&line)
     })
     .await
     .map_err(to_error)?
+    .map_err(AppError::from)
 }
 
 fn diagnostic_extension(mime_type: &str) -> &'static str {
@@ -1565,10 +1600,11 @@ fn write_diagnostic_image(
 }
 
 #[tauri::command]
-async fn save_inpaint_diagnostics(diagnostic: InpaintDiagnostic) -> Result<String, String> {
+async fn save_inpaint_diagnostics(diagnostic: InpaintDiagnostic) -> Result<String, AppError> {
     tokio::task::spawn_blocking(move || save_inpaint_diagnostics_sync(diagnostic))
         .await
         .map_err(to_error)?
+        .map_err(AppError::from)
 }
 
 fn save_inpaint_diagnostics_sync(diagnostic: InpaintDiagnostic) -> Result<String, String> {
@@ -1635,7 +1671,7 @@ fn save_inpaint_diagnostics_sync(diagnostic: InpaintDiagnostic) -> Result<String
     Ok(dir.to_string_lossy().to_string())
 }
 
-fn read_token() -> Result<String, String> {
+fn read_token() -> Result<String, AppError> {
     if let Some(token) = cached_token() {
         return Ok(token);
     }
@@ -1646,8 +1682,11 @@ fn read_token() -> Result<String, String> {
             remember_token(&token);
             Ok(token)
         }
-        Ok(_) | Err(keyring::Error::NoEntry) => Err("API Token is not configured".to_string()),
-        Err(err) => Err(to_error(err)),
+        Ok(_) | Err(keyring::Error::NoEntry) => Err(AppError::new(
+            "token_missing",
+            "API Token is not configured",
+        )),
+        Err(err) => Err(AppError::new("keyring", to_error(err))),
     }
 }
 
@@ -1656,7 +1695,7 @@ async fn get_json(
     token: &str,
     url: &str,
     proxy_url: Option<&str>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let response = client
         .get(url)
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -1667,7 +1706,7 @@ async fn get_json(
     response_json(response).await
 }
 
-async fn response_json(response: reqwest::Response) -> Result<serde_json::Value, String> {
+async fn response_json(response: reqwest::Response) -> Result<serde_json::Value, AppError> {
     let status = response.status();
     let body = response.bytes().await.map_err(to_error)?.to_vec();
 
@@ -1675,7 +1714,9 @@ async fn response_json(response: reqwest::Response) -> Result<serde_json::Value,
         return Err(format_api_error(status.as_u16(), &body));
     }
 
-    serde_json::from_slice(&body).map_err(to_error)
+    serde_json::from_slice(&body)
+        .map_err(to_error)
+        .map_err(AppError::from)
 }
 
 async fn post_zip_like(
@@ -1684,7 +1725,7 @@ async fn post_zip_like(
     payload: serde_json::Value,
     allow_invalid_tls: bool,
     proxy_url: Option<&str>,
-) -> Result<GenerateImageResponse, String> {
+) -> Result<GenerateImageResponse, AppError> {
     let client = api_client(allow_invalid_tls, proxy_url)?;
     let response = client
         .post(url)
@@ -2030,17 +2071,71 @@ fn decode_zip_images(body: Vec<u8>) -> Result<Vec<GeneratedImage>, String> {
     }
 
     if images.is_empty() {
-        return Err("The API response did not contain any image files".to_string());
+        return Err("The API response did not contain any image files"
+            .to_string()
+            .into());
     }
 
     Ok(images)
 }
 
-fn format_api_error(status: u16, body: &[u8]) -> String {
+/// Error returned to the frontend. `code` is stable and machine readable so the
+/// UI can branch without matching on translated message text.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppError {
+    pub code: String,
+    pub message: String,
+}
+
+impl AppError {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AppError {}
+
+impl From<String> for AppError {
+    fn from(message: String) -> Self {
+        Self::new("unknown", message)
+    }
+}
+
+impl From<&str> for AppError {
+    fn from(message: &str) -> Self {
+        Self::new("unknown", message)
+    }
+}
+
+impl From<AppError> for String {
+    fn from(error: AppError) -> Self {
+        error.message
+    }
+}
+
+fn format_api_error(status: u16, body: &[u8]) -> AppError {
+    let code = match status {
+        401 | 403 => "unauthorized",
+        402 => "insufficient_anlas",
+        429 => "rate_limited",
+        400..=499 => "invalid_request",
+        _ => "server_error",
+    };
+
     let text = String::from_utf8_lossy(body);
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return format!("NovelAI API returned HTTP {status}");
+        return AppError::new(code, format!("NovelAI API returned HTTP {status}"));
     }
 
     let message = serde_json::from_str::<serde_json::Value>(trimmed)
@@ -2054,7 +2149,10 @@ fn format_api_error(status: u16, body: &[u8]) -> String {
         })
         .unwrap_or_else(|| trimmed.chars().take(300).collect());
 
-    format!("NovelAI API returned HTTP {status}: {message}")
+    AppError::new(
+        code,
+        format!("NovelAI API returned HTTP {status}: {message}"),
+    )
 }
 
 fn default_file_name(content_type: &str, index: usize) -> String {
@@ -2144,18 +2242,24 @@ fn to_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
-fn format_request_error(error: reqwest::Error, url: &str, proxy_url: Option<&str>) -> String {
+fn format_request_error(error: reqwest::Error, url: &str, proxy_url: Option<&str>) -> AppError {
     let proxy = proxy_url.map(str::trim).filter(|value| !value.is_empty());
     let target = proxy
         .map(|value| format!("代理 {}", safe_proxy_display(value)))
         .unwrap_or_else(|| "当前网络".to_string());
 
     if error.is_timeout() {
-        return format!("连接 NovelAI 超时（{url}，使用{target}）。请检查网络或代理设置。",);
+        return AppError::new(
+            "network_timeout",
+            format!("连接 NovelAI 超时（{url}，使用{target}）。请检查网络或代理设置。"),
+        );
     }
 
     if error.is_connect() {
-        return format!("无法连接 NovelAI（{url}，使用{target}）。请检查网络或代理地址是否可用。",);
+        return AppError::new(
+            "network_connect",
+            format!("无法连接 NovelAI（{url}，使用{target}）。请检查网络或代理地址是否可用。"),
+        );
     }
 
     let details = if proxy.is_some() {
@@ -2163,7 +2267,10 @@ fn format_request_error(error: reqwest::Error, url: &str, proxy_url: Option<&str
     } else {
         error.to_string()
     };
-    format!("NovelAI 请求失败（{url}，使用{target}）：{details}")
+    AppError::new(
+        "network",
+        format!("NovelAI 请求失败（{url}，使用{target}）：{details}"),
+    )
 }
 
 fn safe_proxy_display(value: &str) -> String {

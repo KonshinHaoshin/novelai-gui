@@ -37,8 +37,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import appIcon from "../icon.png";
+import appIcon from "./assets/logo-128.png";
 import { PresetsPage } from "./PresetsPage";
+import { errorMessage, errorCode } from "./errors";
 import { WritingStudio } from "./WritingStudio";
 import { LocalApiSettings } from "./LocalApiSettings";
 import {
@@ -445,7 +446,7 @@ function App() {
           refreshAccountStatus(false);
         }
       })
-      .catch((error) => showNotice("error", String(error)));
+      .catch((error) => showNotice("error", errorMessage(error)));
   }, []);
 
   useEffect(() => {
@@ -656,7 +657,7 @@ function App() {
             : "Token 已保存，但账号状态暂时无法验证。",
       );
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", message);
       writeAppLog("error", "token", message);
     }
@@ -686,12 +687,12 @@ function App() {
       return { summary, tokenMissing: false };
     } catch (error) {
       const tokenMissing = isTokenNotConfiguredError(error);
-      const message = tokenMissing ? TOKEN_NOT_CONFIGURED_MESSAGE : String(error);
+      const message = tokenMissing ? TOKEN_NOT_CONFIGURED_MESSAGE : errorMessage(error);
       setAccount(null);
       if (tokenMissing) {
         setHasToken(false);
       }
-      writeAppLog("error", "account", String(error));
+      writeAppLog("error", "account", errorMessage(error));
       if (showResult) {
         showNotice("error", message);
       }
@@ -784,7 +785,7 @@ function App() {
             });
             writeAppLog("success", "infill", `诊断图已保存：${path}`);
           } catch (error) {
-            writeAppLog("warning", "infill", `诊断图保存失败：${String(error)}`);
+            writeAppLog("warning", "infill", `诊断图保存失败：${errorMessage(error)}`);
           }
         }
       }
@@ -821,7 +822,7 @@ function App() {
         );
       }
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       writeAppLog(
         message.includes("Concurrent generation is locked") ? "warning" : "error",
         "generate",
@@ -882,7 +883,7 @@ function App() {
           ]);
           return { ...image, persistedPath: persisted.path, thumbBase64 };
         } catch (error) {
-          writeAppLog("warning", "persist", `缓存生成图失败：${String(error)}`);
+          writeAppLog("warning", "persist", `缓存生成图失败：${errorMessage(error)}`);
           return image;
         }
       }),
@@ -904,7 +905,7 @@ function App() {
           const asset = await invoke<ImageAsset>("read_image_file", { path: image.persistedPath });
           return { ...image, base64: asset.base64, byteLen: Math.floor(asset.base64.length * 0.75) };
         } catch (error) {
-          writeAppLog("warning", "hydrate", `读取缓存图片失败：${String(error)}`);
+          writeAppLog("warning", "hydrate", `读取缓存图片失败：${errorMessage(error)}`);
           return image;
         }
       }),
@@ -938,7 +939,7 @@ function App() {
       showNotice("success", `已保存到 ${path}`);
       writeAppLog("success", "save-image", `已保存图片：${path}`);
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", message);
       writeAppLog("error", "save-image", message);
     }
@@ -971,7 +972,7 @@ function App() {
     try {
       await invoke("reveal_in_finder", { path: image.savedPath });
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `打开 Finder 失败：${message}`);
       writeAppLog("error", "reveal-image", message);
     }
@@ -991,7 +992,7 @@ function App() {
       updateSetting("saveDirectory", directory);
       showNotice("success", `图片保存目录已设置为 ${directory}`);
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `选择保存目录失败：${message}`);
       writeAppLog("error", "save-directory", message);
     }
@@ -1018,7 +1019,7 @@ function App() {
       showNotice("success", "图片已复制到剪贴板。");
       writeAppLog("success", "copy-image", `已复制图片：${image.fileName}`);
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `复制图片失败：${message}`);
       writeAppLog("error", "copy-image", message);
     }
@@ -1099,7 +1100,7 @@ function App() {
       setTagSuggestions(tags);
       showNotice(tags.length > 0 ? "success" : "info", tags.length > 0 ? `找到 ${tags.length} 个 tag 建议。` : "没有 tag 建议。");
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsSuggestingTags(false);
     }
@@ -1149,7 +1150,7 @@ function App() {
       update("referenceInformationExtractedMultiple", encodedImages.map(() => request.referenceInformationExtracted));
       showNotice("success", `Vibe 已编码 ${encodedImages.length} 张并写入生成参数。`);
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsEncodingVibe(false);
     }
@@ -1186,7 +1187,7 @@ function App() {
       setSelectedImage(0);
       showNotice("success", `超分完成，收到 ${response.images.length} 张图。`);
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsToolRunning(false);
     }
@@ -1222,7 +1223,7 @@ function App() {
       setSelectedImage(0);
       showNotice("success", `Director Tool 完成，收到 ${response.images.length} 张图。`);
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsToolRunning(false);
     }
@@ -1248,7 +1249,7 @@ function App() {
       await navigator.clipboard.writeText(text);
       showNotice("success", "Prompt 已复制到剪贴板。");
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `复制 Prompt 失败：${message}`);
       writeAppLog("error", "copy-prompt", message);
     }
@@ -1368,7 +1369,7 @@ function App() {
       update(field, translated as ImageRequest[typeof field]);
       showNotice("success", direction === "zh-to-en-tags" ? "提示词已转为英文 tag。" : "提示词已翻译为中文。");
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setTranslatingField(null);
     }
@@ -1389,7 +1390,7 @@ function App() {
       updateCharacter(id, field, translated);
       showNotice("success", direction === "zh-to-en-tags" ? "角色提示词已转为英文 tag。" : "角色提示词已翻译为中文。");
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setTranslatingField(null);
     }
@@ -1540,7 +1541,7 @@ function App() {
 
       applyImportedMetadata(imported, file.name);
     } catch (error) {
-      const message = `解析图片元数据失败：${String(error)}`;
+      const message = `解析图片元数据失败：${errorMessage(error)}`;
       showNotice("error", message);
       writeAppLog("error", "image-import", message);
     }
@@ -1622,7 +1623,7 @@ function App() {
     try {
       update(key, await imageAssetFromFile(file));
     } catch (error) {
-      showNotice("error", `读取图片失败：${String(error)}`);
+      showNotice("error", `读取图片失败：${errorMessage(error)}`);
     }
   }
 
@@ -1652,7 +1653,7 @@ function App() {
     try {
       appendMultipleAssets(await Promise.all(imageFiles.map(imageAssetFromFile)), key);
     } catch (error) {
-      showNotice("error", `读取图片失败：${String(error)}`);
+      showNotice("error", `读取图片失败：${errorMessage(error)}`);
     }
   }
 
@@ -1672,7 +1673,7 @@ function App() {
       );
       appendMultipleAssets(nextAssets, key);
     } catch (error) {
-      showNotice("error", `读取拖入图片失败：${String(error)}`);
+      showNotice("error", `读取拖入图片失败：${errorMessage(error)}`);
     }
   }
 
@@ -5064,7 +5065,7 @@ function normalizeTier(value?: string) {
 }
 
 function isTokenNotConfiguredError(error: unknown) {
-  return String(error).includes(TOKEN_NOT_CONFIGURED_ERROR);
+  return errorCode(error) === "token_missing" || errorMessage(error).includes(TOKEN_NOT_CONFIGURED_ERROR);
 }
 
 function estimateAnlasCost(request: ImageRequest, account: AccountSummary | null): AnlasEstimate | null {

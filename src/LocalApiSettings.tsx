@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { Copy, Download, LoaderCircle, Play, Server, Square } from "lucide-react";
 import { useEffect, useState } from "react";
+import { errorMessage } from "./errors";
 
 type GatewayStatus = { running: boolean; host: string | null; port: number | null; baseUrl: string | null };
 type Props = { hasToken: boolean; allowInvalidTls: boolean; proxyUrl: string };
@@ -33,7 +34,7 @@ export function LocalApiSettings({ hasToken, allowInvalidTls, proxyUrl }: Props)
       const result = await invoke<{ path: string; backupPath: string | null }>("write_opencode_config", { model, makeDefault });
       setBackupPath(result.backupPath);
       setIntegrationNotice("配置已写入。重开 OpenCode，选择 NovelAI 模型与 novelai 智能体。");
-    } catch (error) { setIntegrationNotice(String(error)); }
+    } catch (error) { setIntegrationNotice(errorMessage(error)); }
     finally { setWriting(false); }
   };
   useEffect(() => {
@@ -43,7 +44,7 @@ export function LocalApiSettings({ hasToken, allowInvalidTls, proxyUrl }: Props)
       if (disposed) return;
       setStatus(value);
       if (value.running && value.host && value.port) { setHost(value.host); setPort(value.port); }
-    }).catch((error) => { if (!disposed) setNotice(String(error)); });
+    }).catch((error) => { if (!disposed) setNotice(errorMessage(error)); });
     void refresh();
     const interval = window.setInterval(() => void refresh(), 4000);
     return () => { disposed = true; window.clearInterval(interval); };
@@ -57,7 +58,7 @@ export function LocalApiSettings({ hasToken, allowInvalidTls, proxyUrl }: Props)
         : await invoke<GatewayStatus>("start_gateway", { config: { host: host.trim(), port, allowInvalidTls, proxyUrl: proxyUrl || null } });
       setStatus(next);
       setNotice(next.running ? "本地 API 已启动。使用下方地址和独立访问密钥连接。" : "本地 API 已停止。");
-    } catch (error) { setNotice(String(error)); }
+    } catch (error) { setNotice(errorMessage(error)); }
     finally { setBusy(false); }
   };
   const copy = async (kind: "url" | "key") => {
@@ -66,7 +67,7 @@ export function LocalApiSettings({ hasToken, allowInvalidTls, proxyUrl }: Props)
       if (!value) return;
       await navigator.clipboard.writeText(value);
       setNotice(kind === "key" ? "已复制本地 API 访问密钥。" : "已复制 Base URL。");
-    } catch (error) { setNotice(`复制失败：${String(error)}`); }
+    } catch (error) { setNotice(`复制失败：${errorMessage(error)}`); }
   };
   return (
     <section className="settings-panel local-api-settings">

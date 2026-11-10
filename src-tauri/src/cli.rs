@@ -256,7 +256,7 @@ fn cli_token() -> Result<String, String> {
     match std::env::var("NOVELAI_API_TOKEN") {
         Ok(token) if !token.trim().is_empty() => Ok(token.trim().to_string()),
         Ok(_) => Err("NOVELAI_API_TOKEN is empty".to_string()),
-        Err(std::env::VarError::NotPresent) => read_token(),
+        Err(std::env::VarError::NotPresent) => read_token().map_err(String::from),
         Err(error) => Err(to_error(error)),
     }
 }
@@ -870,8 +870,7 @@ mod tests {
                 );
             }
 
-            request.director_reference_images =
-                vec!["first".into(), " ".into(), "second".into()];
+            request.director_reference_images = vec!["first".into(), " ".into(), "second".into()];
             for streaming in [false, true] {
                 let payload = build_image_payload(&request, streaming).unwrap();
                 let parameters = &payload["parameters"];
@@ -880,7 +879,10 @@ mod tests {
                     serde_json::json!([1.0, 1.0])
                 );
                 assert_eq!(
-                    parameters["director_reference_images"].as_array().unwrap().len(),
+                    parameters["director_reference_images"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
                     2
                 );
                 assert_eq!(

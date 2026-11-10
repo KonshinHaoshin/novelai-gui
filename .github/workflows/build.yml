@@ -17,8 +17,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  checks:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check version consistency
+        run: node scripts/bump-version.mjs --check
+
+      - name: Type-check and build frontend
+        run: npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features cli --all-targets
+
+      - name: Run tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features cli
+
   package:
     name: ${{ matrix.name }}
+    needs: checks
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -114,6 +151,17 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match version v$version" >&2
+            exit 1
+          fi
+
       - name: Download desktop packages
         uses: actions/download-artifact@v4
         with:
@@ -131,4 +179,8 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-files/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+        run: |
+          cd release-files
+          sha256sum * > SHA256SUMS
+          cd ..
+          gh release create "$GITHUB_REF_NAME" release-files/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

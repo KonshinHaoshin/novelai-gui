@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { errorMessage } from "./errors";
 import { listen } from "@tauri-apps/api/event";
 import {
   BookOpen,
@@ -139,7 +140,7 @@ function separateLibraries(saved: NovelProject[]): NovelProject[] {
 }
 
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return error instanceof Error ? error.message : errorMessage(error);
 }
 
 export function WritingStudio({ hasToken, allowInvalidTls, proxyUrl, onOpenSettings }: WritingStudioProps) {
