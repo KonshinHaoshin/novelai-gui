@@ -3960,8 +3960,13 @@ input[type="range"]::-webkit-slider-thumb {
 .writing-chat-message.user + .writing-chat-message.assistant { margin-top: 24px; }
 .writing-chat-message.assistant + .writing-chat-message.user { margin-top: 20px; }
 
-.writing-chat-message { min-width: 0; display: flex; }
-.writing-chat-message.user { justify-content: flex-end; }
+.writing-chat-message { min-width: 0; display: flex; gap: 0; }
+.writing-chat-message.user {
+  justify-content: flex-end;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
 .writing-chat-message.user,
 .writing-chat-message.user .writing-chat-message-body { max-width: 78%; }
 
