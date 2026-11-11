@@ -28,7 +28,10 @@ import {
 type GalleryEntry = { item: HistoryItem; image: GeneratedImage; imageIndex: number };
 
 const GALLERY_CARD_MIN_WIDTH = 200;
-const GALLERY_ROW_HEIGHT = 296;
+const GALLERY_GAP = 10;
+/** Card width plus the non-image part (info, action rows, borders), measured from the rendered card. */
+const GALLERY_CARD_CHROME = 170;
+const GALLERY_DEFAULT_ROW_HEIGHT = 390;
 const GALLERY_OVERSCAN_ROWS = 2;
 
 /** Windowed grid: only the rows near the viewport are mounted. */
@@ -38,9 +41,12 @@ function VirtualGrid<T>(props: {
   renderItem: (item: T, index: number) => React.ReactNode;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [columns, setColumns] = useState(1);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(640);
+  const [layout, setLayout] = useState({
+    columns: 1,
+    rowHeight: GALLERY_DEFAULT_ROW_HEIGHT,
+    viewportHeight: 640,
+    scrollTop: 0,
+  });
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -50,9 +56,20 @@ function VirtualGrid<T>(props: {
 
     const measure = () => {
       const width = element.clientWidth || GALLERY_CARD_MIN_WIDTH;
-      setColumns(Math.max(1, Math.floor(width / GALLERY_CARD_MIN_WIDTH)));
-      setViewportHeight(element.clientHeight || 640);
-      setScrollTop(element.scrollTop);
+      const columns = Math.max(
+        1,
+        Math.floor((width + GALLERY_GAP) / (GALLERY_CARD_MIN_WIDTH + GALLERY_GAP)),
+      );
+      const columnWidth = Math.max(
+        GALLERY_CARD_MIN_WIDTH,
+        (width - (columns - 1) * GALLERY_GAP) / columns,
+      );
+      setLayout({
+        columns,
+        rowHeight: Math.ceil(columnWidth + GALLERY_CARD_CHROME + GALLERY_GAP),
+        viewportHeight: element.clientHeight || 640,
+        scrollTop: element.scrollTop,
+      });
     };
 
     measure();
@@ -65,11 +82,15 @@ function VirtualGrid<T>(props: {
     };
   }, []);
 
+  const { columns, rowHeight, viewportHeight, scrollTop } = layout;
   const rowCount = Math.ceil(props.items.length / columns);
-  const firstRow = Math.max(0, Math.floor(scrollTop / GALLERY_ROW_HEIGHT) - GALLERY_OVERSCAN_ROWS);
+  const firstRow = Math.min(
+    Math.max(0, rowCount - 1),
+    Math.max(0, Math.floor(scrollTop / rowHeight) - GALLERY_OVERSCAN_ROWS),
+  );
   const lastRow = Math.min(
     rowCount,
-    Math.ceil((scrollTop + viewportHeight) / GALLERY_ROW_HEIGHT) + GALLERY_OVERSCAN_ROWS,
+    Math.ceil((scrollTop + viewportHeight) / rowHeight) + GALLERY_OVERSCAN_ROWS,
   );
   const startIndex = firstRow * columns;
   const endIndex = Math.min(props.items.length, lastRow * columns);
@@ -77,10 +98,10 @@ function VirtualGrid<T>(props: {
 
   return (
     <div className="virtual-grid-scroll" ref={scrollRef}>
-      <div className="virtual-grid-spacer" style={{ height: rowCount * GALLERY_ROW_HEIGHT }}>
+      <div className="virtual-grid-spacer" style={{ height: rowCount * rowHeight }}>
         <div
           className="favorites-grid history-gallery-grid virtual-grid-window"
-          style={{ transform: `translateY(${firstRow * GALLERY_ROW_HEIGHT}px)`, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+          style={{ transform: `translateY(${firstRow * rowHeight}px)`, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
         >
           {visible.map((item, offset) => (
             <div key={props.itemKey(item, startIndex + offset)} className="virtual-grid-cell">

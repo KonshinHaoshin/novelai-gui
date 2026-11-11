@@ -42,6 +42,9 @@ export function findStringByKeys(value: unknown, keys: string[]): string | undef
     if (typeof found === "string" && found.trim()) {
       return found;
     }
+    if (typeof found === "number" && Number.isFinite(found)) {
+      return String(found);
+    }
   }
   return undefined;
 }
@@ -70,16 +73,20 @@ export function clampCoordinate(value: number) {
   if (!Number.isFinite(value)) {
     return 0.5;
   }
-  return Math.min(Math.max(value, 0), 1);
+  return Math.min(1, Math.max(0, Number(value.toFixed(2))));
 }
 
 export function clamp01(value: number) {
   if (!Number.isFinite(value)) {
     return 0;
   }
-  return Math.min(Math.max(value, 0), 1);
+  return Math.min(1, Math.max(0, Number(value.toFixed(2))));
+}
+
+export function isImagePath(path: string) {
+  return /\.(png|jpe?g|webp|bmp|gif)$/i.test(path);
 }
 
 export function isImageFile(file: File) {
-  return file.type.startsWith("image/");
+  return file.type.startsWith("image/") || isImagePath(file.name);
 }

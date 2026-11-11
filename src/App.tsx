@@ -39,8 +39,8 @@ import type { ChangeEvent, ClipboardEvent as ReactClipboardEvent, DragEvent as R
 import { createPortal } from "react-dom";
 import appIcon from "./assets/logo-128.png";
 import { PresetsPage } from "./PresetsPage";
-import { errorMessage, errorCode } from "./errors";
-import { clamp01, clampCoordinate, findAllByKeys, findBooleanByKeys, findByKeys, findNumberByKeys, findStringByKeys, isImageFile, isRecord } from "./valueUtils";
+import { errorMessage } from "./errors";
+import { clamp01, clampCoordinate, findAllByKeys, findBooleanByKeys, findByKeys, findNumberByKeys, findStringByKeys, isImageFile, isImagePath, isRecord } from "./valueUtils";
 import { findImageFileFromClipboard, parseNovelAiImageMetadata } from "./imageMetadata";
 import {
   HistoryGalleryPage,
@@ -75,7 +75,6 @@ import {
   imageDataUrl,
   fullImageDataUrl,
   imageAssetFromFile,
-  isImagePath,
   generatedImageToAsset,
   loadImageElement,
   imageAssetFromCanvas,

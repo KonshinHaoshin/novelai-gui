@@ -1113,4 +1113,3 @@ function indexOfZero(bytes: Uint8Array, start: number) {
   }
   return -1;
 }
-

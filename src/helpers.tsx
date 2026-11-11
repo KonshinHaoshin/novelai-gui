@@ -321,7 +321,7 @@ export function base64ToBlob(base64: string, mimeType: string) {
 
 /** Stable identity for a generated image, independent of its (possibly unloaded) payload. */
 export function imageKey(image: GeneratedImage) {
-  return image.id ?? image.persistedPath ?? image.savedPath ?? image.fileName;
+  return image.id ?? image.persistedPath ?? image.savedPath ?? image.base64 ?? image.fileName;
 }
 
 /** Downscale a generated image so history can render it without keeping the full payload. */
@@ -375,11 +375,6 @@ export async function imageAssetFromFile(file: File): Promise<ImageAsset> {
     mimeType,
     base64: dataUrl.slice(markerIndex + marker.length),
   };
-}
-
-
-export function isImagePath(path: string) {
-  return /\.(png|jpe?g|webp|bmp|gif)$/i.test(path);
 }
 
 export function generatedImageToAsset(image: GeneratedImage): ImageAsset {
@@ -1157,12 +1152,16 @@ export function historyToPersist(items: HistoryItem[]): HistoryItem[] {
 }
 
 export function ensureImageIds(images: GeneratedImage[]): GeneratedImage[] {
-  return images.map((image) => (image.id ? image : { ...image, id: crypto.randomUUID() }));
+  return images.map((image) => (
+    image.id || image.base64 ? image : { ...image, id: crypto.randomUUID() }
+  ));
 }
 
 /** History keeps only a thumbnail and a cache path; the payload is reloaded on demand. */
 export function stripImagePayloads(images: GeneratedImage[]): GeneratedImage[] {
-  return images.map((image) => (image.persistedPath ? { ...image, base64: "" } : image));
+  return images.map((image) => (
+    image.persistedPath && image.thumbBase64 ? { ...image, base64: "" } : image
+  ));
 }
 
 export async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {
