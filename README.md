@@ -11,9 +11,32 @@ NovelAI GUI 是一个面向 NovelAI 图像生成 API 的桌面客户端，基于
 - 解析 NovelAI 图像 API 返回的 ZIP 图片包
 - 下载图片时文件名会附带时间戳；极短时间内发生重名时会再追加序号，避免覆盖已有图片
 - 支持生成历史恢复和历史显示上限设置
+- 生成后图片写入本地缓存，历史记录只保存缩略图与路径，重启后按需回读原图
 - Token 通过 Tauri 后端保存到系统凭据，不写入前端本地存储
 - 请求体预览默认关闭，可在设置页开启
 - CLI 支持账户查询、文生图、图生图、局部重绘、V5 透明底、应用共享预设及 JSON 请求配置
+
+## 开发与发布
+
+```bash
+npm ci
+npm run dev            # 仅前端
+npm run tauri:dev      # 桌面调试
+
+npm test               # 前端单元测试（vitest）
+npm run build          # tsc + vite 生产构建
+cd src-tauri && cargo test --features cli   # 后端测试
+
+npm run version:bump 0.2.5   # 同步 5 个清单文件的版本号
+node scripts/bump-version.mjs --check        # CI 校验版本一致性
+npm run tauri:build          # 打包（bundle.targets = all，按平台产出全部安装器）
+```
+
+发布走 GitHub Actions：推送 `v*` tag 触发，`checks` 任务先跑版本校验、`cargo fmt --check`、`clippy`、`cargo test` 和前端构建，通过后 macOS 产 dmg、Windows 产 nsis，Release 附带 `SHA256SUMS`。tag 必须与 `package.json` 的版本一致，否则 release 任务会失败。
+
+macOS 包使用 ad-hoc 签名（`signingIdentity: "-"`），未做 Apple 公证，用户首次打开需在「系统设置 → 隐私与安全性」中放行。
+
+Windows 版依赖 WebView2 运行时；安装器会在缺失时自动安装。从源码用 MinGW 构建时，`target/release/WebView2Loader.dll` 必须与 `novelai-gui.exe` 放在同一目录。
 
 ## 项目结构
 

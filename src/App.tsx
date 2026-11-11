@@ -37,8 +37,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import appIcon from "../icon.png";
+import appIcon from "./assets/logo-128.png";
 import { PresetsPage } from "./PresetsPage";
+import { errorMessage, errorCode } from "./errors";
 import { WritingStudio } from "./WritingStudio";
 import { LocalApiSettings } from "./LocalApiSettings";
 import {
@@ -127,11 +128,14 @@ type CharacterPrompt = {
 };
 
 type GeneratedImage = {
+  id?: string;
   fileName: string;
   mimeType: string;
   byteLen: number;
   base64: string;
   savedPath?: string;
+  persistedPath?: string;
+  thumbBase64?: string;
   index?: number;
   seed?: number;
 };
@@ -442,7 +446,7 @@ function App() {
           refreshAccountStatus(false);
         }
       })
-      .catch((error) => showNotice("error", String(error)));
+      .catch((error) => showNotice("error", errorMessage(error)));
   }, []);
 
   useEffect(() => {
@@ -450,7 +454,7 @@ function App() {
       return;
     }
 
-    void saveHistoryToIndexedDb(history.slice(0, MAX_HISTORY_ITEMS)).catch((error) => {
+    void saveHistoryToIndexedDb(historyToPersist(history.slice(0, MAX_HISTORY_ITEMS))).catch((error) => {
       console.error(error);
       setNotice({ type: "error", message: "历史记录写入失败，请稍后重试。" });
     });
@@ -653,7 +657,7 @@ function App() {
             : "Token 已保存，但账号状态暂时无法验证。",
       );
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", message);
       writeAppLog("error", "token", message);
     }
@@ -683,12 +687,12 @@ function App() {
       return { summary, tokenMissing: false };
     } catch (error) {
       const tokenMissing = isTokenNotConfiguredError(error);
-      const message = tokenMissing ? TOKEN_NOT_CONFIGURED_MESSAGE : String(error);
+      const message = tokenMissing ? TOKEN_NOT_CONFIGURED_MESSAGE : errorMessage(error);
       setAccount(null);
       if (tokenMissing) {
         setHasToken(false);
       }
-      writeAppLog("error", "account", String(error));
+      writeAppLog("error", "account", errorMessage(error));
       if (showResult) {
         showNotice("error", message);
       }
@@ -781,10 +785,11 @@ function App() {
             });
             writeAppLog("success", "infill", `诊断图已保存：${path}`);
           } catch (error) {
-            writeAppLog("warning", "infill", `诊断图保存失败：${String(error)}`);
+            writeAppLog("warning", "infill", `诊断图保存失败：${errorMessage(error)}`);
           }
         }
       }
+      displayImages = await persistGeneratedImages(displayImages);
       setActiveImages(displayImages);
       setSelectedImage(0);
       setHistory((items) =>
@@ -793,7 +798,7 @@ function App() {
             id: crypto.randomUUID(),
             createdAt: new Date().toISOString(),
             request,
-            images: displayImages,
+            images: stripImagePayloads(displayImages),
           },
           ...items,
         ].slice(0, MAX_HISTORY_ITEMS),
@@ -817,7 +822,7 @@ function App() {
         );
       }
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       writeAppLog(
         message.includes("Concurrent generation is locked") ? "warning" : "error",
         "generate",
@@ -856,6 +861,59 @@ function App() {
     return () => window.removeEventListener("keydown", handleGenerateShortcut);
   }, [activePanel, canGenerate, request, settings]);
 
+  /** Persist freshly generated images to disk so history only keeps a thumbnail and a path. */
+  async function persistGeneratedImages(images: GeneratedImage[]): Promise<GeneratedImage[]> {
+    const withIds = images.map((image) => ({ ...image, id: image.id ?? crypto.randomUUID() }));
+    if (!isTauriRuntime()) {
+      return withIds;
+    }
+    const batchId = crypto.randomUUID();
+
+    return Promise.all(
+      withIds.map(async (image) => {
+        if (image.persistedPath || !image.base64) {
+          return image;
+        }
+        try {
+          const [persisted, thumbBase64] = await Promise.all([
+            invoke<{ path: string }>("persist_generated_image", {
+              fileName: image.fileName,
+              base64: image.base64,
+              batchId,
+            }),
+            createThumbnailBase64(image),
+          ]);
+          return { ...image, persistedPath: persisted.path, thumbBase64 };
+        } catch (error) {
+          writeAppLog("warning", "persist", `缓存生成图失败：${errorMessage(error)}`);
+          return image;
+        }
+      }),
+    );
+  }
+
+  /** Load the full payload for images restored from history (thumbnail only). */
+  async function withImageData(images: GeneratedImage[]): Promise<GeneratedImage[]> {
+    if (!isTauriRuntime()) {
+      return images;
+    }
+
+    return Promise.all(
+      images.map(async (image) => {
+        if (image.base64 || !image.persistedPath) {
+          return image;
+        }
+        try {
+          const asset = await invoke<ImageAsset>("read_image_file", { path: image.persistedPath });
+          return { ...image, base64: asset.base64, byteLen: Math.floor(asset.base64.length * 0.75) };
+        } catch (error) {
+          writeAppLog("warning", "hydrate", `读取缓存图片失败：${errorMessage(error)}`);
+          return image;
+        }
+      }),
+    );
+  }
+
   async function saveImage(image: GeneratedImage) {
     if (!isTauriRuntime()) {
       showNotice("info", "请在 Tauri 桌面窗口中保存图片。");
@@ -866,28 +924,37 @@ function App() {
       const now = new Date();
       const pad = (value: number) => String(value).padStart(2, "0");
       const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${String(now.getMilliseconds()).padStart(3, "0")}`;
-      const path = await invoke<string>("save_generated_image", {
-        fileName: `${timestamp}-${image.fileName}`,
-        base64: image.base64,
-        saveDirectory: settings.saveDirectory.trim() || null,
-      });
+      const fileName = `${timestamp}-${image.fileName}`;
+      const saveDirectory = settings.saveDirectory.trim() || null;
+      const path = image.persistedPath
+        ? await invoke<string>("save_persisted_image", {
+          sourcePath: image.persistedPath,
+          fileName,
+          saveDirectory,
+        })
+        : await invoke<string>("save_generated_image", {
+          fileName,
+          base64: image.base64,
+          saveDirectory,
+        });
       markImageSaved(image, path);
       showNotice("success", `已保存到 ${path}`);
       writeAppLog("success", "save-image", `已保存图片：${path}`);
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", message);
       writeAppLog("error", "save-image", message);
     }
   }
 
   function markImageSaved(image: GeneratedImage, path: string) {
+    const key = imageKey(image);
     const updateImage = (candidate: GeneratedImage) =>
-      candidate.base64 === image.base64 ? { ...candidate, savedPath: path } : candidate;
+      imageKey(candidate) === key ? { ...candidate, savedPath: path } : candidate;
     setActiveImages((items) => items.map(updateImage));
     setHistory((items) => items.map((item) => ({ ...item, images: item.images.map(updateImage) })));
     setFavorites((items) => items.map((item) => (
-      item.image.base64 === image.base64
+      imageKey(item.image) === key
         ? { ...item, image: updateImage(item.image) }
         : item
     )));
@@ -907,7 +974,7 @@ function App() {
     try {
       await invoke("reveal_in_finder", { path: image.savedPath });
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `打开 Finder 失败：${message}`);
       writeAppLog("error", "reveal-image", message);
     }
@@ -927,7 +994,7 @@ function App() {
       updateSetting("saveDirectory", directory);
       showNotice("success", `图片保存目录已设置为 ${directory}`);
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `选择保存目录失败：${message}`);
       writeAppLog("error", "save-directory", message);
     }
@@ -954,7 +1021,7 @@ function App() {
       showNotice("success", "图片已复制到剪贴板。");
       writeAppLog("success", "copy-image", `已复制图片：${image.fileName}`);
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `复制图片失败：${message}`);
       writeAppLog("error", "copy-image", message);
     }
@@ -964,19 +1031,22 @@ function App() {
     if (!image) {
       return false;
     }
-    return favorites.some((item) => item.image.base64 === image.base64);
+    const key = imageKey(image);
+    return favorites.some((item) => imageKey(item.image) === key);
   }
 
-  function toggleFavorite(image: GeneratedImage) {
-    const existing = favorites.find((item) => item.image.base64 === image.base64);
+  async function toggleFavorite(image: GeneratedImage) {
+    const key = imageKey(image);
+    const existing = favorites.find((item) => imageKey(item.image) === key);
     if (existing) {
       setFavorites((items) => items.filter((item) => item.id !== existing.id));
       showNotice("info", "已取消收藏。");
       return;
     }
 
+    const [hydrated] = await withImageData([image]);
     const sourceHistory = history.find((item) =>
-      item.images.some((historyImage) => historyImage.base64 === image.base64),
+      item.images.some((historyImage) => imageKey(historyImage) === key),
     );
 
     setFavorites((items) => [
@@ -984,7 +1054,7 @@ function App() {
         id: crypto.randomUUID(),
         createdAt: new Date().toISOString(),
         request: sourceHistory?.request ?? request,
-        image,
+        image: hydrated,
       },
       ...items,
     ]);
@@ -1032,7 +1102,7 @@ function App() {
       setTagSuggestions(tags);
       showNotice(tags.length > 0 ? "success" : "info", tags.length > 0 ? `找到 ${tags.length} 个 tag 建议。` : "没有 tag 建议。");
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsSuggestingTags(false);
     }
@@ -1082,7 +1152,7 @@ function App() {
       update("referenceInformationExtractedMultiple", encodedImages.map(() => request.referenceInformationExtracted));
       showNotice("success", `Vibe 已编码 ${encodedImages.length} 张并写入生成参数。`);
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsEncodingVibe(false);
     }
@@ -1119,7 +1189,7 @@ function App() {
       setSelectedImage(0);
       showNotice("success", `超分完成，收到 ${response.images.length} 张图。`);
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsToolRunning(false);
     }
@@ -1155,20 +1225,20 @@ function App() {
       setSelectedImage(0);
       showNotice("success", `Director Tool 完成，收到 ${response.images.length} 张图。`);
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setIsToolRunning(false);
     }
   }
 
-  function reuse(item: HistoryItem, imageIndex = 0) {
+  async function reuse(item: HistoryItem, imageIndex = 0) {
     setRequest(normalizeImageRequest(item.request));
-    setActiveImages(item.images);
+    setActiveImages(await withImageData(item.images));
     setSelectedImage(Math.min(Math.max(imageIndex, 0), Math.max(item.images.length - 1, 0)));
   }
 
-  function rerunHistoryItem(item: HistoryItem, imageIndex: number) {
-    reuse(item, imageIndex);
+  async function rerunHistoryItem(item: HistoryItem, imageIndex: number) {
+    await reuse(item, imageIndex);
     setActivePanel("generate");
     showNotice("info", "已加载原参数，可直接重新生成。");
   }
@@ -1181,26 +1251,27 @@ function App() {
       await navigator.clipboard.writeText(text);
       showNotice("success", "Prompt 已复制到剪贴板。");
     } catch (error) {
-      const message = String(error);
+      const message = errorMessage(error);
       showNotice("error", `复制 Prompt 失败：${message}`);
       writeAppLog("error", "copy-prompt", message);
     }
   }
 
-  function randomSeedHistoryItem(item: HistoryItem, imageIndex: number) {
+  async function randomSeedHistoryItem(item: HistoryItem, imageIndex: number) {
     const nextRequest = normalizeImageRequest({
       ...item.request,
       seed: Math.floor(Math.random() * 4294967296),
     });
     setRequest(nextRequest);
-    setActiveImages(item.images);
+    setActiveImages(await withImageData(item.images));
     setSelectedImage(imageIndex);
     setActivePanel("generate");
     showNotice("info", "已加载参数并随机生成新的 seed。");
   }
 
-  function sendHistoryToImageMode(item: HistoryItem, imageIndex: number, action: "img2img" | "infill") {
-    const image = item.images[imageIndex];
+  async function sendHistoryToImageMode(item: HistoryItem, imageIndex: number, action: "img2img" | "infill") {
+    const images = await withImageData(item.images);
+    const image = images[imageIndex];
     if (!image) {
       return;
     }
@@ -1220,7 +1291,7 @@ function App() {
         : {}),
     });
     setRequest(nextRequest);
-    setActiveImages(item.images);
+    setActiveImages(images);
     setSelectedImage(imageIndex);
     setMaskEditorOpen(false);
     setActivePanel("generate");
@@ -1300,7 +1371,7 @@ function App() {
       update(field, translated as ImageRequest[typeof field]);
       showNotice("success", direction === "zh-to-en-tags" ? "提示词已转为英文 tag。" : "提示词已翻译为中文。");
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setTranslatingField(null);
     }
@@ -1321,7 +1392,7 @@ function App() {
       updateCharacter(id, field, translated);
       showNotice("success", direction === "zh-to-en-tags" ? "角色提示词已转为英文 tag。" : "角色提示词已翻译为中文。");
     } catch (error) {
-      showNotice("error", String(error));
+      showNotice("error", errorMessage(error));
     } finally {
       setTranslatingField(null);
     }
@@ -1472,7 +1543,7 @@ function App() {
 
       applyImportedMetadata(imported, file.name);
     } catch (error) {
-      const message = `解析图片元数据失败：${String(error)}`;
+      const message = `解析图片元数据失败：${errorMessage(error)}`;
       showNotice("error", message);
       writeAppLog("error", "image-import", message);
     }
@@ -1554,7 +1625,7 @@ function App() {
     try {
       update(key, await imageAssetFromFile(file));
     } catch (error) {
-      showNotice("error", `读取图片失败：${String(error)}`);
+      showNotice("error", `读取图片失败：${errorMessage(error)}`);
     }
   }
 
@@ -1584,7 +1655,7 @@ function App() {
     try {
       appendMultipleAssets(await Promise.all(imageFiles.map(imageAssetFromFile)), key);
     } catch (error) {
-      showNotice("error", `读取图片失败：${String(error)}`);
+      showNotice("error", `读取图片失败：${errorMessage(error)}`);
     }
   }
 
@@ -1604,7 +1675,7 @@ function App() {
       );
       appendMultipleAssets(nextAssets, key);
     } catch (error) {
-      showNotice("error", `读取拖入图片失败：${String(error)}`);
+      showNotice("error", `读取拖入图片失败：${errorMessage(error)}`);
     }
   }
 
@@ -2244,7 +2315,7 @@ function App() {
           <div className="image-viewer">
             {currentImage ? (
               <img
-                src={`data:${currentImage.mimeType};base64,${currentImage.base64}`}
+                src={fullImageDataUrl(currentImage)}
                 alt={currentImage.fileName}
                 onError={() => showNotice("error", `${currentImage.fileName} 无法被 WebView 解码。`)}
               />
@@ -2285,12 +2356,12 @@ function App() {
                     item.images.map((image, imageIndex) => (
                       <div className="history-thumb-wrap" key={`${item.id}-${image.fileName}-${imageIndex}`}>
                         <button
-                          className={currentImage?.base64 === image.base64 ? "history-thumb active" : "history-thumb"}
+                          className={currentImage && imageKey(currentImage) === imageKey(image) ? "history-thumb active" : "history-thumb"}
                           onClick={() => reuse(item, imageIndex)}
                           title={new Date(item.createdAt).toLocaleString()}
                           type="button"
                         >
-                          <img src={`data:${image.mimeType};base64,${image.base64}`} alt="" />
+                          <img src={imageDataUrl(image)} alt="" />
                         </button>
                         <HistoryThumbnailMenu
                           item={item}
@@ -2781,7 +2852,7 @@ function App() {
                 {favorites.map((item) => (
                   <article className="favorite-card" key={item.id}>
                     <button className="favorite-image" onClick={() => openFavorite(item)} type="button">
-                      <img src={`data:${item.image.mimeType};base64,${item.image.base64}`} alt="" />
+                      <img src={imageDataUrl(item.image)} alt="" />
                     </button>
                     <div className="favorite-info">
                       <strong>{item.request.prompt || "未命名提示词"}</strong>
@@ -3112,7 +3183,7 @@ function HistoryGalleryPage(props: {
                       aria-label={`打开历史图片：${prompt}`}
                       type="button"
                     >
-                      <img src={`data:${image.mimeType};base64,${image.base64}`} alt={prompt} loading="lazy" />
+                      <img src={imageDataUrl(image)} alt={prompt} loading="lazy" />
                     </button>
                     <div className="favorite-info history-gallery-info">
                       <strong title={prompt}>{prompt}</strong>
@@ -4333,6 +4404,44 @@ function base64ToBlob(base64: string, mimeType: string) {
   return new Blob([bytes], { type: mimeType });
 }
 
+/** Stable identity for a generated image, independent of its (possibly unloaded) payload. */
+function imageKey(image: GeneratedImage) {
+  return image.id ?? image.persistedPath ?? image.savedPath ?? image.base64 ?? image.fileName;
+}
+
+/** Downscale a generated image so history can render it without keeping the full payload. */
+async function createThumbnailBase64(image: GeneratedImage, maxSize = 320): Promise<string | undefined> {
+  if (!image.base64) {
+    return undefined;
+  }
+  try {
+    const bitmap = await createImageBitmap(base64ToBlob(image.base64, image.mimeType));
+    const scale = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    return canvas.toDataURL("image/webp", 0.72);
+  } catch {
+    return undefined;
+  }
+}
+
+function imageDataUrl(image: GeneratedImage) {
+  if (image.thumbBase64) {
+    return image.thumbBase64;
+  }
+  return image.base64 ? `data:${image.mimeType};base64,${image.base64}` : "";
+}
+
+/** Full-resolution data URL, falling back to the thumbnail while the payload is being loaded. */
+function fullImageDataUrl(image: GeneratedImage) {
+  return image.base64
+    ? `data:${image.mimeType};base64,${image.base64}`
+    : image.thumbBase64 ?? "";
+}
+
 async function imageAssetFromFile(file: File): Promise<ImageAsset> {
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -4958,7 +5067,7 @@ function normalizeTier(value?: string) {
 }
 
 function isTokenNotConfiguredError(error: unknown) {
-  return String(error).includes(TOKEN_NOT_CONFIGURED_ERROR);
+  return errorCode(error) === "token_missing" || errorMessage(error).includes(TOKEN_NOT_CONFIGURED_ERROR);
 }
 
 function estimateAnlasCost(request: ImageRequest, account: AccountSummary | null): AnlasEstimate | null {
@@ -5203,6 +5312,27 @@ function clampHistoryLimit(value: number) {
   return Math.min(MAX_HISTORY_ITEMS, Math.max(1, Math.round(value)));
 }
 
+/**
+ * History keeps a thumbnail and the cache path; the full payload stays on disk
+ * (or in the original record for entries written before this change).
+ */
+function historyToPersist(items: HistoryItem[]): HistoryItem[] {
+  return items.map((item) => ({ ...item, images: stripImagePayloads(item.images) }));
+}
+
+function ensureImageIds(images: GeneratedImage[]): GeneratedImage[] {
+  return images.map((image) => (
+    image.id || image.base64 ? image : { ...image, id: crypto.randomUUID() }
+  ));
+}
+
+/** History keeps only a thumbnail and a cache path; the payload is reloaded on demand. */
+function stripImagePayloads(images: GeneratedImage[]): GeneratedImage[] {
+  return images.map((image) => (
+    image.persistedPath && image.thumbBase64 ? { ...image, base64: "" } : image
+  ));
+}
+
 async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {
   const legacy = migrateLegacyHistoryFromLocalStorage();
   if (legacy) {
@@ -5210,7 +5340,6 @@ async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {
     localStorage.removeItem(HISTORY_KEY);
     return sortHistory(legacy);
   }
-
   if (!("indexedDB" in window)) {
     return [];
   }
@@ -5223,6 +5352,7 @@ async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {
     return sortHistory(items).map((item) => ({
       ...item,
       request: normalizeImageRequest(item.request),
+      images: ensureImageIds(item.images ?? []),
     }));
   } finally {
     db.close();
@@ -5246,6 +5376,7 @@ async function loadFavoritesFromIndexedDb(): Promise<FavoriteItem[]> {
       .map((item) => ({
         ...item,
         request: normalizeImageRequest(item.request),
+        image: ensureImageIds([item.image])[0],
       }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   } finally {

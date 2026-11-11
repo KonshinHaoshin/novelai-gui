@@ -1,6 +1,45 @@
 //! Prompt-based function calling for NovelAI; never executes tools.
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use uuid::Uuid;
+
+static ATTRIBUTE_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
+        .expect("attribute regex is valid")
+});
+
+static ASSIGNMENT_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|'([^']*)')"#)
+        .expect("assignment regex is valid")
+});
+
+static OPENING_TAG_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"^<([A-Za-z_][A-Za-z0-9_]*)(?:\s+name=["']([^"']+)["'])?\s*>"#)
+        .expect("opening tag regex is valid")
+});
+
+static TOOL_PATTERN_CACHE: LazyLock<Mutex<HashMap<String, regex::Regex>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Compile (once) the tag pattern for a single tool name.
+fn tool_pattern(escaped: &str) -> Option<regex::Regex> {
+    let mut cache = TOOL_PATTERN_CACHE.lock().ok()?;
+    if let Some(pattern) = cache.get(escaped) {
+        return Some(pattern.clone());
+    }
+
+    let pattern = regex::Regex::new(&format!(
+        r#"<(?:{escaped}(?:\s[^>]*)?|(?:invoke|function)\s+name\s*=\s*["']{escaped}["']\s*|(?:invoke|function)={escaped}|(?:invoke|function)>\s*<name>\s*{escaped}\s*</name\s*)>"#
+    ))
+    .ok()?;
+
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(escaped.to_string(), pattern.clone());
+    Some(pattern)
+}
 
 pub struct ToolAdapter {
     tools: Vec<Value>,
@@ -9,14 +48,11 @@ pub struct ToolAdapter {
 impl ToolAdapter {
     fn xml_calls(&self, text: &str) -> Result<Option<Value>, String> {
         let mut calls = Vec::new();
-        let attributes =
-            regex::Regex::new(r#"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap();
+        let attributes = ATTRIBUTE_PATTERN.clone();
         for tool in &self.tools {
             let name = tool["function"]["name"].as_str().unwrap();
             let escaped = regex::escape(name);
-            let pattern = regex::Regex::new(&format!(
-                r#"<(?:{escaped}(?:\s[^>]*)?|(?:invoke|function)\s+name\s*=\s*["']{escaped}["']\s*|(?:invoke|function)={escaped}|(?:invoke|function)>\s*<name>\s*{escaped}\s*</name\s*)>"#
-            )).map_err(|_| "工具名称无效。")?;
+            let pattern = tool_pattern(&escaped).ok_or_else(|| "工具名称无效。".to_string())?;
             for tag in pattern.find_iter(text) {
                 let wrapper = if tag.as_str().starts_with("<invoke ")
                     || tag.as_str().starts_with("<invoke=")
@@ -81,10 +117,7 @@ impl ToolAdapter {
                         let raw = capture.get(2).or_else(|| capture.get(3)).unwrap().as_str();
                         args.insert(key.into(), parameter_value(key, raw)?);
                     }
-                    let assignments = regex::Regex::new(
-                        r#"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|'([^']*)')"#,
-                    )
-                    .unwrap();
+                    let assignments = ASSIGNMENT_PATTERN.clone();
                     let mut assignment_tail = body;
                     let mut body_args = serde_json::Map::new();
                     while let Some(capture) = assignments.captures(assignment_tail) {
@@ -140,10 +173,7 @@ impl ToolAdapter {
                     } else if !body.is_empty() {
                         // Accept named XML parameters, but consume the entire body so
                         // malformed or extra content cannot be silently discarded.
-                        let opening = regex::Regex::new(
-                            r#"^<([A-Za-z_][A-Za-z0-9_]*)(?:\s+name=["']([^"']+)["'])?\s*>"#,
-                        )
-                        .unwrap();
+                        let opening = OPENING_TAG_PATTERN.clone();
                         let mut remaining = body;
                         while let Some(capture) = opening.captures(remaining) {
                             let tag_name = &capture[1];
