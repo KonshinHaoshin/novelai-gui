@@ -43,11 +43,28 @@ export function WritingChat(props: WritingChatProps) {
   const scrollArea = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const followBottom = useRef(true);
+  const jumping = useRef(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const handleScroll = () => {
+    const area = scrollArea.current;
+    if (!area) return;
+    const distance = area.scrollHeight - area.scrollTop - area.clientHeight;
+    if (jumping.current && distance <= 100) {
+      jumping.current = false;
+    }
+    if (!jumping.current) {
+      followBottom.current = distance < 100;
+    }
+    setShowJump(!jumping.current && distance > JUMP_THRESHOLD);
+    setScrolled(area.scrollTop > 8);
+  };
 
   useEffect(() => {
     const area = scrollArea.current;
-    if (area && followBottom.current) area.scrollTop = area.scrollHeight;
+    if (!area) return;
+    if (followBottom.current) area.scrollTop = area.scrollHeight;
+    handleScroll();
   }, [props.messages, props.draft, props.loading]);
 
   useEffect(() => {
@@ -58,18 +75,16 @@ export function WritingChat(props: WritingChatProps) {
 
   useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
 
-  const handleScroll = () => {
-    const area = scrollArea.current;
-    if (!area) return;
-    const distance = area.scrollHeight - area.scrollTop - area.clientHeight;
-    followBottom.current = distance < 100;
-    setShowJump(distance > JUMP_THRESHOLD);
-    setScrolled(area.scrollTop > 8);
-  };
-
   const jumpToBottom = () => {
     const area = scrollArea.current;
     if (!area) return;
+    const distance = area.scrollHeight - area.scrollTop - area.clientHeight;
+    if (distance < 100) {
+      followBottom.current = true;
+      setShowJump(false);
+      return;
+    }
+    jumping.current = true;
     followBottom.current = true;
     area.scrollTo({ top: area.scrollHeight, behavior: "smooth" });
     setShowJump(false);
@@ -146,8 +161,8 @@ export function WritingChat(props: WritingChatProps) {
                         <span>{message.inserted ? "已保存" : "存为正文"}</span>
                       </button>
                     ) : null}
-                    {message.status === "error" ? <span className="writing-chat-error">生成中断，已保留收到的内容</span> : null}
                   </div>
+                  {message.status === "error" ? <span className="writing-chat-error">生成中断，已保留收到的内容</span> : null}
                 </div>
               </article>
             ))}
@@ -188,13 +203,12 @@ export function WritingChat(props: WritingChatProps) {
         )}
       </div>
 
-      {showJump ? (
-        <button className="writing-chat-jump" onClick={jumpToBottom} type="button" aria-label="回到底部" title="回到底部">
-          <ArrowDown aria-hidden="true" />
-        </button>
-      ) : null}
-
       <div className="writing-chat-composer-area">
+        {showJump ? (
+          <button className="writing-chat-jump" onClick={jumpToBottom} type="button" aria-label="回到底部" title="回到底部">
+            <ArrowDown aria-hidden="true" />
+          </button>
+        ) : null}
         {!props.hasToken ? (
           <button className="writing-chat-token-link" onClick={props.onOpenSettings} type="button">
             设置 NovelAI 令牌，开始对话写作

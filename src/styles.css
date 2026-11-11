@@ -4039,7 +4039,12 @@ input[type="range"]::-webkit-slider-thumb {
 
 .writing-chat-message-actions button:disabled { opacity: 0.45; }
 .writing-chat-message-actions button svg { width: 13px; height: 13px; }
-.writing-chat-error { color: var(--muted-fg); font-size: 11px; }
+.writing-chat-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-fg);
+  font-size: 11px;
+}
 
 .writing-chat-thinking {
   display: flex;
@@ -4116,7 +4121,7 @@ input[type="range"]::-webkit-slider-thumb {
 .writing-chat-jump {
   position: absolute;
   left: 50%;
-  bottom: 148px;
+  bottom: calc(100% + 12px);
   transform: translateX(-50%);
   z-index: 6;
   display: grid;
