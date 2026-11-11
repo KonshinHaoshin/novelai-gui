@@ -2409,6 +2409,15 @@ pub fn run() {
 mod medium_effort_tests {
     use super::*;
 
+    /// `scale` / `cfg_rescale` are f32, so a literal f64 comparison never matches.
+    fn assert_close(value: &Value, expected: f64) {
+        let actual = value.as_f64().expect("numeric value");
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     fn base_request() -> ImageGenerateRequest {
         serde_json::from_value(serde_json::json!({
             "prompt": "1girl", "negativePrompt": "hat",
@@ -2433,7 +2442,7 @@ mod medium_effort_tests {
         let parameters = &payload["parameters"];
         assert_eq!(parameters["steps"], 14);
         assert_eq!(parameters["sampler"], "k_euler_ancestral");
-        assert_eq!(parameters["cfg_rescale"], 0.0);
+        assert_close(&parameters["cfg_rescale"], 0.0);
         assert_eq!(parameters["ucPreset"], 2);
         assert_eq!(parameters["tag_hint_uc_preset"], 2);
         // The base UC is whatever the frontend injected (Heavy); per-character UC is dropped.
@@ -2447,7 +2456,7 @@ mod medium_effort_tests {
             ""
         );
         // Guidance stays the user's.
-        assert_eq!(parameters["scale"], 5);
+        assert_close(&parameters["scale"], 5.0);
         assert_eq!(parameters["prompt"], "1girl");
     }
 
@@ -2469,7 +2478,7 @@ mod medium_effort_tests {
         assert_eq!(payload["model"], "nai-diffusion-5-full");
         assert_eq!(payload["parameters"]["steps"], 23);
         assert_eq!(payload["parameters"]["sampler"], "k_dpmpp_2m");
-        assert_eq!(payload["parameters"]["cfg_rescale"], 0.4);
+        assert_close(&payload["parameters"]["cfg_rescale"], 0.4);
         assert_eq!(payload["parameters"]["negative_prompt"], "hat");
     }
 
@@ -2484,7 +2493,7 @@ mod medium_effort_tests {
         assert_eq!(payload["model"], "nai-diffusion-4-5-full");
         assert_eq!(payload["parameters"]["steps"], 23);
         assert_eq!(payload["parameters"]["sampler"], "k_dpmpp_2m");
-        assert_eq!(payload["parameters"]["cfg_rescale"], 0.4);
+        assert_close(&payload["parameters"]["cfg_rescale"], 0.4);
         assert_eq!(payload["parameters"]["ucPreset"], 2);
     }
 }
