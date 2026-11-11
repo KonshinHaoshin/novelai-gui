@@ -30,8 +30,14 @@ function write(relativePath, content) {
 }
 
 function bumpJson(relativePath, version) {
-  const document = JSON.parse(read(relativePath));
+  const text = read(relativePath);
+  const document = JSON.parse(text);
   const previous = document.version;
+  if (relativePath === "src-tauri/tauri.conf.json") {
+    // Keep the checked-in formatting (not JSON.stringify, which expands inline objects).
+    write(relativePath, text.replace(/("version"\s*:\s*")[^"]*(")/, `$1${version}$2`));
+    return previous;
+  }
   document.version = version;
   if (document.packages?.[""]) {
     document.packages[""].version = version;

@@ -867,6 +867,7 @@ function App() {
     if (!isTauriRuntime()) {
       return withIds;
     }
+    const batchId = crypto.randomUUID();
 
     return Promise.all(
       withIds.map(async (image) => {
@@ -878,6 +879,7 @@ function App() {
             invoke<{ path: string }>("persist_generated_image", {
               fileName: image.fileName,
               base64: image.base64,
+              batchId,
             }),
             createThumbnailBase64(image),
           ]);
@@ -4404,7 +4406,7 @@ function base64ToBlob(base64: string, mimeType: string) {
 
 /** Stable identity for a generated image, independent of its (possibly unloaded) payload. */
 function imageKey(image: GeneratedImage) {
-  return image.id ?? image.persistedPath ?? image.savedPath ?? image.fileName;
+  return image.id ?? image.persistedPath ?? image.savedPath ?? image.base64 ?? image.fileName;
 }
 
 /** Downscale a generated image so history can render it without keeping the full payload. */
@@ -5319,12 +5321,16 @@ function historyToPersist(items: HistoryItem[]): HistoryItem[] {
 }
 
 function ensureImageIds(images: GeneratedImage[]): GeneratedImage[] {
-  return images.map((image) => (image.id ? image : { ...image, id: crypto.randomUUID() }));
+  return images.map((image) => (
+    image.id || image.base64 ? image : { ...image, id: crypto.randomUUID() }
+  ));
 }
 
 /** History keeps only a thumbnail and a cache path; the payload is reloaded on demand. */
 function stripImagePayloads(images: GeneratedImage[]): GeneratedImage[] {
-  return images.map((image) => (image.persistedPath ? { ...image, base64: "" } : image));
+  return images.map((image) => (
+    image.persistedPath && image.thumbBase64 ? { ...image, base64: "" } : image
+  ));
 }
 
 async function loadHistoryFromIndexedDb(): Promise<HistoryItem[]> {

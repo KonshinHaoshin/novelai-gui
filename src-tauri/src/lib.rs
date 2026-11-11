@@ -1416,7 +1416,8 @@ fn prune_generated_cache(keep: usize) {
         .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            name.parse::<u128>().ok().map(|stamp| (stamp, entry.path()))
+            let stamp = name.split('-').next()?.parse::<u128>().ok()?;
+            Some((stamp, entry.path()))
         })
         .collect();
 
@@ -1437,6 +1438,7 @@ fn prune_generated_cache(keep: usize) {
 async fn persist_generated_image(
     file_name: String,
     base64: String,
+    batch_id: Option<String>,
 ) -> Result<PersistedImage, AppError> {
     tokio::task::spawn_blocking(move || -> Result<PersistedImage, String> {
         let bytes = BASE64.decode(base64).map_err(to_error)?;
@@ -1444,8 +1446,19 @@ async fn persist_generated_image(
             .duration_since(UNIX_EPOCH)
             .map_err(to_error)?
             .as_millis();
+        let batch = batch_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                    })
+            })
+            .map(str::to_string)
+            .unwrap_or_else(|| stamp.to_string());
         let mut dir = generated_cache_dir();
-        dir.push(stamp.to_string());
+        dir.push(format!("{stamp}-{batch}"));
         fs::create_dir_all(&dir).map_err(to_error)?;
         let (path, mut file) = create_unique_file(&dir, &sanitize_file_name(&file_name))?;
         file.write_all(&bytes)
