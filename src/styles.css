@@ -4277,3 +4277,69 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* Ensure the chat surface fills its layout cell in both grid and flex hosts. */
 .writing-chat { flex: 1 1 auto; width: 100%; }
+
+/* V5 complexity quick tags and the in-image text field. */
+.tag-chip-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.tag-chip-label {
+  color: var(--muted-fg);
+  font-size: 11px;
+  margin-right: 2px;
+}
+
+.tag-chip-row .chip {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.prompt-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.prompt-inline-field > span {
+  flex: 0 0 auto;
+  color: var(--muted-fg);
+  font-size: 11px;
+}
+
+.prompt-inline-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line-input);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.prompt-inline-field input:focus {
+  outline: 0;
+  border-color: var(--fg);
+}
+
+.field-note {
+  margin-top: 6px;
+  color: var(--muted-fg);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.field-note code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface);
+  font-size: 10px;
+}

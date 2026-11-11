@@ -66,6 +66,8 @@ pub struct ImageGenerateRequest {
     #[serde(default)]
     pub negative_prompt: String,
     #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
     pub characters: Vec<CharacterPrompt>,
     #[serde(default)]
     pub use_character_coords: bool,
@@ -154,7 +156,7 @@ pub struct ImageGenerateRequest {
     pub proxy_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacterPrompt {
     pub prompt: String,
@@ -387,22 +389,60 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
         return Err("Prompt cannot be empty".to_string());
     }
 
-    let api_model = effective_image_model(&request.model, &request.action);
+    let mut api_model = effective_image_model(&request.model, &request.action);
+    // Medium effort (V5 Full only) runs on a separate distilled checkpoint and
+    // pins what NovelAI's client fixes before sending: 14 steps on Euler
+    // Ancestral, the Heavy UC preset with no custom UC (base or per
+    // character), and no CFG rescale. NovelAI suggests negative emphasis
+    // (e.g. -3::hat::) in the prompt in place of UC on this tier.
+    let medium_requested = request
+        .effort
+        .as_deref()
+        .map(|effort| effort.eq_ignore_ascii_case("medium"))
+        .unwrap_or(false)
+        || request.model.contains("-medium")
+        || api_model.contains("-medium");
+    if medium_requested && !api_model.contains("-medium") {
+        api_model = api_model.replace("nai-diffusion-5-full", "nai-diffusion-5-full-medium");
+    }
+    // Only pin the Medium settings when the resolved checkpoint really is that
+    // variant; a stale `medium` flag on V4.x / V5 Curated must not rewrite steps.
+    let medium_effort = api_model.starts_with("nai-diffusion-5-full-medium");
+
+    let prompt = request.prompt.clone();
+    let negative_prompt = request.negative_prompt.clone();
+    let mut characters = request.characters.clone();
+    let mut steps = request.steps;
+    let mut sampler = request.sampler.clone();
+    let mut cfg_rescale = request.cfg_rescale;
+    let mut uc_preset = request.uc_preset;
+    if medium_effort {
+        steps = 14;
+        sampler = "k_euler_ancestral".to_string();
+        cfg_rescale = 0.0;
+        uc_preset = 2; // Heavy
+                       // Medium keeps the Heavy base UC but drops any per-character UC; the
+                       // frontend has already replaced custom UC text with the Heavy preset.
+        for character in &mut characters {
+            character.negative_prompt.clear();
+        }
+    }
+
     let mut parameters = serde_json::json!({
         "width": request.width,
         "height": request.height,
-        "prompt": request.prompt,
-        "negative_prompt": request.negative_prompt,
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
         "n_samples": request.n_samples,
-        "steps": request.steps,
+        "steps": steps,
         "scale": request.scale,
-        "cfg_rescale": request.cfg_rescale,
-        "sampler": request.sampler,
+        "cfg_rescale": cfg_rescale,
+        "sampler": sampler,
         "noise_schedule": request.noise_schedule,
         "image_format": request.image_format,
         "qualityToggle": request.quality_toggle,
-        "ucPreset": request.uc_preset,
-        "tag_hint_uc_preset": request.uc_preset,
+        "ucPreset": uc_preset,
+        "tag_hint_uc_preset": uc_preset,
         "params_version": request.params_version,
         "dynamic_thresholding": request.dynamic_thresholding,
         "sm": request.sm,
@@ -412,7 +452,7 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
     });
 
     if is_modern_image_model(&api_model) {
-        let character_captions = build_character_captions(&request.characters);
+        let character_captions = build_character_captions(&characters);
         let use_coords = request.use_character_coords && !character_captions.is_empty();
         parameters["legacy"] = serde_json::json!(false);
         parameters["legacy_uc"] = serde_json::json!(false);
@@ -421,7 +461,7 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
         parameters["use_coords"] = serde_json::json!(use_coords);
         parameters["v4_prompt"] = serde_json::json!({
             "caption": {
-                "base_caption": request.prompt,
+                "base_caption": prompt,
                 "char_captions": character_captions
                     .iter()
                     .map(|character| serde_json::json!({
@@ -435,7 +475,7 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
         });
         parameters["v4_negative_prompt"] = serde_json::json!({
             "caption": {
-                "base_caption": request.negative_prompt,
+                "base_caption": negative_prompt,
                 "char_captions": character_captions
                     .iter()
                     .map(|character| serde_json::json!({
@@ -624,7 +664,7 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
     }
 
     Ok(serde_json::json!({
-        "input": request.prompt,
+        "input": prompt,
         "model": api_model,
         "action": request.action,
         "parameters": parameters,
@@ -2363,4 +2403,97 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod medium_effort_tests {
+    use super::*;
+
+    /// `scale` / `cfg_rescale` are f32, so a literal f64 comparison never matches.
+    fn assert_close(value: &Value, expected: f64) {
+        let actual = value.as_f64().expect("numeric value");
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn base_request() -> ImageGenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "1girl", "negativePrompt": "hat",
+            "characters": [{"prompt": "1girl", "negativePrompt": "hat", "x": 0.5, "y": 0.5}],
+            "model": "nai-diffusion-5-full", "action": "generate",
+            "width": 832, "height": 1216, "nSamples": 1, "steps": 23, "scale": 5,
+            "cfgRescale": 0.4, "sampler": "k_dpmpp_2m", "noiseSchedule": "karras",
+            "imageFormat": "png", "qualityToggle": true, "transparentBackground": false,
+            "ucPreset": 2, "paramsVersion": 4, "dynamicThresholding": false,
+            "sm": false, "smDyn": false,
+            "deliberateEulerAncestralBug": false, "preferBrownian": true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn medium_effort_pins_what_the_official_client_fixes() {
+        let mut request = base_request();
+        request.effort = Some("medium".into());
+        let payload = build_image_payload(&request, false).unwrap();
+        assert_eq!(payload["model"], "nai-diffusion-5-full-medium");
+        let parameters = &payload["parameters"];
+        assert_eq!(parameters["steps"], 14);
+        assert_eq!(parameters["sampler"], "k_euler_ancestral");
+        assert_close(&parameters["cfg_rescale"], 0.0);
+        assert_eq!(parameters["ucPreset"], 2);
+        assert_eq!(parameters["tag_hint_uc_preset"], 2);
+        // The base UC is whatever the frontend injected (Heavy); per-character UC is dropped.
+        assert_eq!(parameters["negative_prompt"], "hat");
+        assert_eq!(
+            parameters["v4_negative_prompt"]["caption"]["base_caption"],
+            "hat"
+        );
+        assert_eq!(
+            parameters["v4_negative_prompt"]["caption"]["char_captions"][0]["char_caption"],
+            ""
+        );
+        // Guidance stays the user's.
+        assert_close(&parameters["scale"], 5.0);
+        assert_eq!(parameters["prompt"], "1girl");
+    }
+
+    #[test]
+    fn medium_effort_infill_uses_the_medium_inpainting_checkpoint() {
+        let mut request = base_request();
+        request.effort = Some("medium".into());
+        request.action = "infill".into();
+        request.source_image = Some("aW1n".into());
+        request.mask_image = Some("bWFzaw==".into());
+        let payload = build_image_payload(&request, false).unwrap();
+        assert_eq!(payload["model"], "nai-diffusion-5-full-medium-inpainting");
+    }
+
+    #[test]
+    fn high_effort_keeps_user_settings() {
+        let request = base_request();
+        let payload = build_image_payload(&request, false).unwrap();
+        assert_eq!(payload["model"], "nai-diffusion-5-full");
+        assert_eq!(payload["parameters"]["steps"], 23);
+        assert_eq!(payload["parameters"]["sampler"], "k_dpmpp_2m");
+        assert_close(&payload["parameters"]["cfg_rescale"], 0.4);
+        assert_eq!(payload["parameters"]["negative_prompt"], "hat");
+    }
+
+    #[test]
+    fn medium_flag_on_a_model_without_a_medium_checkpoint_changes_nothing() {
+        // The GUI already blocks this, but a stale request must not have its
+        // steps / sampler / UC rewritten while the model stays on 4.5.
+        let mut request = base_request();
+        request.model = "nai-diffusion-4-5-full".into();
+        request.effort = Some("medium".into());
+        let payload = build_image_payload(&request, false).unwrap();
+        assert_eq!(payload["model"], "nai-diffusion-4-5-full");
+        assert_eq!(payload["parameters"]["steps"], 23);
+        assert_eq!(payload["parameters"]["sampler"], "k_dpmpp_2m");
+        assert_close(&payload["parameters"]["cfg_rescale"], 0.4);
+        assert_eq!(payload["parameters"]["ucPreset"], 2);
+    }
 }
