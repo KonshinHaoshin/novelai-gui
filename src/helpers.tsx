@@ -20,12 +20,14 @@ import {
 } from "./constants";
 import {
   TAG_HINT,
+  availableUcPresets,
   baseModelId,
   defaultStepsForModel,
   legacyUcIndexToOfficial,
   maxCharactersForModel,
   mediumEffortForModel,
   modelProfile,
+  officialUcPresetId,
   paramsVersionForModel,
   qualityAtStart,
   qualityTagsFor,
@@ -317,7 +319,9 @@ export function effectivePrompt(request: ImageRequest) {
     prompt = hasTransparencyTag ? prompt : appendPromptText(prompt, "transparent background");
   }
 
-  const quality = qualityTagsFor(request.model, request.qualityPreset);
+  // Some legacy tables carry a trailing comma ("masterpiece, best quality,"),
+  // which would otherwise produce a doubled separator when composed.
+  const quality = qualityTagsFor(request.model, request.qualityPreset).replace(/[,\s]+$/, "");
   if (quality) {
     prompt = qualityAtStart(request.model) && prompt
       ? `${quality}, ${prompt}`
@@ -642,7 +646,7 @@ export function buildPayloadPreview(request: ImageRequest) {
     noise_schedule: request.noiseSchedule,
     seed: request.seed,
     image_format: request.imageFormat,
-    qualityToggle: request.qualityToggle,
+    qualityToggle: request.qualityPreset !== TAG_HINT.none,
     tag_hint_uc_preset: medium ? TAG_HINT.heavy : request.ucPreset,
     tag_hint_transparent_background: request.transparentBackground && request.action !== "infill",
     straight_alpha: request.transparentBackground && request.action !== "infill",
@@ -767,6 +771,9 @@ export async function buildBackendImageRequest(request: ImageRequest, settings: 
     // Hint ids are consumed by the tag-suggestion endpoint; the text itself is
     // already injected into prompt/negative above.
     tagHintQt: request.qualityPreset,
+    // The old toggle is now derived from the preset so the payload never claims
+    // quality tags that were turned off.
+    qualityToggle: request.qualityPreset !== TAG_HINT.none,
     allowInvalidTls: settings.allowInvalidTls,
     proxyUrl: activeNovelAiProxyUrl(settings),
     model: effectiveImageModel(request),
@@ -854,6 +861,15 @@ export function normalizeImageRequest(request: ImageRequest): ImageRequest {
     ? ""
     : request.negativePrompt;
 
+  // Keep the stored preset inside what this model actually offers, otherwise the
+  // select renders blank and no UC text is injected at all.
+  const ucOptions = availableUcPresets(model);
+  const requestedUc = legacyScheme
+    ? legacyUcIndexToOfficial(request.ucPreset)
+    : request.ucPreset ?? DEFAULT_REQUEST.ucPreset;
+  const requestedUcId = officialUcPresetId(requestedUc) ?? "none";
+  const ucPreset = ucOptions.includes(requestedUcId) ? requestedUc : TAG_HINT[ucOptions[0]];
+
   return {
     ...DEFAULT_REQUEST,
     ...request,
@@ -863,9 +879,7 @@ export function normalizeImageRequest(request: ImageRequest): ImageRequest {
     qualityPreset: legacyScheme
       ? (request.qualityToggle === false ? TAG_HINT.none : TAG_HINT.standard)
       : request.qualityPreset ?? DEFAULT_REQUEST.qualityPreset,
-    ucPreset: legacyScheme
-      ? legacyUcIndexToOfficial(request.ucPreset)
-      : request.ucPreset ?? DEFAULT_REQUEST.ucPreset,
+    ucPreset,
     effort: request.effort === "medium" && mediumEffortForModel(model) ? "medium" : "high",
     paramScheme: 1,
     inImageText: request.inImageText ?? "",

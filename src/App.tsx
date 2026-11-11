@@ -134,6 +134,8 @@ import {
   availableUcPresets,
   maxCharactersForModel,
   mediumEffortForModel,
+  officialUcPresetId,
+  paramsVersionForModel,
   type QualityPresetId,
 } from "./modelProfiles";
 import type {
@@ -1742,6 +1744,12 @@ function App() {
                 if (defaultSteps !== undefined) {
                   update("steps", defaultSteps);
                 }
+                update("paramsVersion", paramsVersionForModel(model));
+                const ucOptions = availableUcPresets(model);
+                const currentUc = officialUcPresetId(request.ucPreset) ?? "none";
+                if (!ucOptions.includes(currentUc)) {
+                  update("ucPreset", TAG_HINT[ucOptions[0]]);
+                }
                 if (!isV5ImageModel(model)) {
                   update("transparentBackground", false);
                 }
@@ -1821,12 +1829,14 @@ function App() {
                   <input
                     aria-label="Steps"
                     type="range"
-                    value={request.steps}
+                    value={mediumPinned ? 14 : request.steps}
                     min={1}
                     max={60}
+                    disabled={mediumPinned}
+                    title={mediumPinned ? "Medium 固定 14 步" : undefined}
                     onChange={(event) => update("steps", Number(event.target.value))}
                   />
-                  <output>{request.steps}</output>
+                  <output>{mediumPinned ? 14 : request.steps}</output>
                 </div>
               </label>
               <label className="range-field">
@@ -2065,18 +2075,22 @@ function App() {
               ))}
             </div>
           ) : null}
-          <label className="prompt-inline-field">
-            <span>图内文字</span>
-            <input
-              value={request.inImageText ?? ""}
-              onChange={(event) => update("inImageText", event.target.value)}
-              placeholder="渲染到图里的文字，V4+ 支持英/日/中，例如 HELLO WORLD"
-              maxLength={200}
-            />
-          </label>
-          <p className="field-note">
-            图内文字会以独立的 <code>Text:</code> 段追加到提示词末尾，约 750 token 上限。
-          </p>
+          {isModernImageModel(request.model) ? (
+            <>
+              <label className="prompt-inline-field">
+                <span>图内文字</span>
+                <input
+                  value={request.inImageText ?? ""}
+                  onChange={(event) => update("inImageText", event.target.value)}
+                  placeholder="渲染到图里的文字，V4+ 支持英/日/中，例如 HELLO WORLD"
+                  maxLength={200}
+                />
+              </label>
+              <p className="field-note">
+                图内文字会以独立的 <code>Text:</code> 段追加到提示词末尾，约 750 token 上限。
+              </p>
+            </>
+          ) : null}
         </section>
 
         <section className="prompt-card compact">
@@ -2638,7 +2652,12 @@ function App() {
               <div className="advanced-fields">
                 <label className="field">
                   <span>采样器</span>
-                  <select value={request.sampler} onChange={(event) => update("sampler", event.target.value)}>
+                  <select
+                    value={mediumPinned ? "k_euler_ancestral" : request.sampler}
+                    disabled={mediumPinned}
+                    title={mediumPinned ? "Medium 固定 Euler Ancestral" : undefined}
+                    onChange={(event) => update("sampler", event.target.value)}
+                  >
                     {SAMPLERS.map((sampler) => (
                       <option key={sampler} value={sampler}>
                         {sampler}

@@ -10,7 +10,7 @@ import {
   legacyUcIndexToOfficial,
 } from "./modelProfiles";
 import { DEFAULT_REQUEST } from "./constants";
-import { effectiveImageModel, effectiveNegativePrompt, effectivePrompt } from "./helpers";
+import { effectiveImageModel, effectiveNegativePrompt, effectivePrompt, normalizeImageRequest } from "./helpers";
 import type { ImageRequest } from "./types";
 
 function request(overrides: Partial<ImageRequest> = {}): ImageRequest {
@@ -51,6 +51,12 @@ describe("quality tags", () => {
         request({ model: "nai-diffusion-2", prompt: "1girl", qualityPreset: TAG_HINT.standard }),
       ),
     ).toBe("very aesthetic, best quality, absurdres, 1girl");
+  });
+
+  it("never doubles the separator when a table entry ends with a comma", () => {
+    expect(effectivePrompt(request({ model: "safe-diffusion", prompt: "1girl" }))).toBe(
+      "masterpiece, best quality, 1girl",
+    );
   });
 });
 
@@ -129,5 +135,43 @@ describe("model limits", () => {
   it("returns no profile for unknown models", () => {
     expect(modelProfile("kandinsky-vanilla")).toBeUndefined();
     expect(modelProfile("nai-diffusion-5-full-medium")).toBeDefined();
+  });
+});
+
+describe("request normalisation", () => {
+  it("drops a UC preset the model does not offer", () => {
+    // nai-diffusion-4-full ships Heavy/Light only; Human Focus must not survive.
+    const normalized = normalizeImageRequest({
+      ...DEFAULT_REQUEST,
+      model: "nai-diffusion-4-full",
+      ucPreset: TAG_HINT.humanFocus,
+      paramScheme: 1,
+    });
+    expect(normalized.ucPreset).toBe(TAG_HINT.heavy);
+  });
+
+  it("keeps a supported UC preset as-is", () => {
+    const normalized = normalizeImageRequest({
+      ...DEFAULT_REQUEST,
+      model: "nai-diffusion-5-full",
+      ucPreset: TAG_HINT.light,
+      paramScheme: 1,
+    });
+    expect(normalized.ucPreset).toBe(TAG_HINT.light);
+  });
+
+  it("migrates legacy UC numbers and clears the old UC blob", () => {
+    const normalized = normalizeImageRequest({
+      ...DEFAULT_REQUEST,
+      model: "nai-diffusion-5-full",
+      ucPreset: 2,
+      qualityToggle: false,
+      paramsVersion: 3,
+      paramScheme: undefined,
+    });
+    expect(normalized.ucPreset).toBe(TAG_HINT.heavy);
+    expect(normalized.qualityPreset).toBe(TAG_HINT.none);
+    expect(normalized.paramsVersion).toBe(4);
+    expect(normalized.paramScheme).toBe(1);
   });
 });

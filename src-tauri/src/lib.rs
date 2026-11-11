@@ -395,16 +395,19 @@ fn build_image_payload(request: &ImageGenerateRequest, streaming: bool) -> Resul
     // Ancestral, the Heavy UC preset with no custom UC (base or per
     // character), and no CFG rescale. NovelAI suggests negative emphasis
     // (e.g. -3::hat::) in the prompt in place of UC on this tier.
-    let medium_effort = request
+    let medium_requested = request
         .effort
         .as_deref()
         .map(|effort| effort.eq_ignore_ascii_case("medium"))
         .unwrap_or(false)
         || request.model.contains("-medium")
         || api_model.contains("-medium");
-    if medium_effort && !api_model.contains("-medium") {
+    if medium_requested && !api_model.contains("-medium") {
         api_model = api_model.replace("nai-diffusion-5-full", "nai-diffusion-5-full-medium");
     }
+    // Only pin the Medium settings when the resolved checkpoint really is that
+    // variant; a stale `medium` flag on V4.x / V5 Curated must not rewrite steps.
+    let medium_effort = api_model.starts_with("nai-diffusion-5-full-medium");
 
     let prompt = request.prompt.clone();
     let negative_prompt = request.negative_prompt.clone();
@@ -2468,5 +2471,20 @@ mod medium_effort_tests {
         assert_eq!(payload["parameters"]["sampler"], "k_dpmpp_2m");
         assert_eq!(payload["parameters"]["cfg_rescale"], 0.4);
         assert_eq!(payload["parameters"]["negative_prompt"], "hat");
+    }
+
+    #[test]
+    fn medium_flag_on_a_model_without_a_medium_checkpoint_changes_nothing() {
+        // The GUI already blocks this, but a stale request must not have its
+        // steps / sampler / UC rewritten while the model stays on 4.5.
+        let mut request = base_request();
+        request.model = "nai-diffusion-4-5-full".into();
+        request.effort = Some("medium".into());
+        let payload = build_image_payload(&request, false).unwrap();
+        assert_eq!(payload["model"], "nai-diffusion-4-5-full");
+        assert_eq!(payload["parameters"]["steps"], 23);
+        assert_eq!(payload["parameters"]["sampler"], "k_dpmpp_2m");
+        assert_eq!(payload["parameters"]["cfg_rescale"], 0.4);
+        assert_eq!(payload["parameters"]["ucPreset"], 2);
     }
 }
