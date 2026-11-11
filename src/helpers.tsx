@@ -764,6 +764,9 @@ export async function buildBackendImageRequest(request: ImageRequest, settings: 
     ...request,
     prompt: effectivePrompt(request),
     negativePrompt: effectiveNegativePrompt(request),
+    // Hint ids are consumed by the tag-suggestion endpoint; the text itself is
+    // already injected into prompt/negative above.
+    tagHintQt: request.qualityPreset,
     allowInvalidTls: settings.allowInvalidTls,
     proxyUrl: activeNovelAiProxyUrl(settings),
     model: effectiveImageModel(request),

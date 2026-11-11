@@ -273,6 +273,7 @@ fn default_request() -> Value {
         "deliberateEulerAncestralBug": false, "preferBrownian": true,
         "addOriginalImage": false, "legacyV3Extend": false, "tagHintQt": null,
         "upscaleBlurSigma": null, "upscaledEnhance": false, "seed": null,
+        "effort": null, "qualityPreset": 1, "paramScheme": 1, "inImageText": "",
     });
     let editing = serde_json::json!({
         "sourceImage": null, "maskImage": null, "strength": 0.55, "noise": 0,
