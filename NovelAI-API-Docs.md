@@ -563,3 +563,46 @@ NovelAI 提供两套 API：
 - 图像/文本生成 API: [https://image.novelai.net/docs/](https://image.novelai.net/docs/) | [https://text.novelai.net/docs/](https://text.novelai.net/docs/)
 - 服务条款: [https://novelai.net/terms](https://novelai.net/terms)
 - Tokenizer: [https://github.com/NovelAI/nai-js-tokenizer](https://github.com/NovelAI/nai-js-tokenizer)
+
+---
+
+## 客户端必须自行展开的字段（V5 经验）
+
+服务端不会根据 `qualityToggle` / `ucPreset` 自动展开文本，官方客户端是在**发送前把文本拼进 payload** 的。以下规则取自
+[docs.novelai.net](https://docs.novelai.net/)（qualitytags、undesiredcontent、effort、tags、models）与官方 OpenAPI 规范，本项目在
+`src/modelProfiles.ts` 内置了对应数据表。
+
+### 质量标签（quality tags）
+
+| 档位 | 追加位置 | V5 Full / Curated |
+| --- | --- | --- |
+| Standard | prompt 末尾 | `very aesthetic, masterpiece, no text` |
+| Light | prompt 末尾 | `very aesthetic, amazing quality, no text` |
+
+V4.5 起步的模型各自有独立文本（V4.5 Full 为 `location, very aesthetic, masterpiece, no text`），V2 的质量标签放在 prompt **开头**。
+`tag_hint_qt` 使用官方编号：`0` None、`1` Standard、`3` Light。
+
+### 负向预设（Undesired Content）
+
+每个模型有独立文本，且分成 Heavy / Light / Human Focus / Furry Focus 四套，需整段拼进 `negative_prompt`。
+`tag_hint_uc_preset` 的官方编号为：`0` None、`2` Heavy、`3` Light、`4` Human Focus、`5` Furry Focus。
+注意 UI 上常见的 `0/1/2/3`（None/Light/Heavy/Human Focus）是另一套自造编号，不能直接当 hint 发送。
+
+### Effort Toggle 与 Medium 档（仅 V5 Full）
+
+Medium 不是参数，而是**换模型 ID**：
+
+| 场景 | High | Medium |
+| --- | --- | --- |
+| 文生图 / 图生图 | `nai-diffusion-5-full` | `nai-diffusion-5-full-medium` |
+| 局部重绘 | `nai-diffusion-5-full-inpainting` | `nai-diffusion-5-full-medium-inpainting` |
+
+官方客户端在 Medium 下会钉死：`steps=14`、`sampler=k_euler_ancestral`、`cfg_rescale=0`、UC 用 Heavy 且清空自定义 UC（含每个角色），
+`scale` 保留用户值。费用约为 High 的 58%。需要移除元素时改用负向强调语法（如 `-3::hat::`），因为自定义 UC 被禁用。
+
+### V5 其他能力
+
+- 角色数量：V5 最多 22 个，V4 / V4.5 为 6 个，V3 及更早不支持多角色。
+- Complexity tags：`low complexity` / `medium complexity` / `high complexity` / `ultra complexity`，仅 V5 生效。
+- 图内文字：把 `Text: 内容` 单独一行放在 prompt **最末尾**，V4+ 支持英/日/中；文字块约 750 token，base prompt 约 1471 token。
+- `params_version`：V5 使用 `4`，V4.x 及更早使用 `3`。

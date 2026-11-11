@@ -396,6 +396,7 @@ export function NumberField(props: {
   min: number;
   max: number;
   step?: number;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   return (
@@ -407,6 +408,7 @@ export function NumberField(props: {
         min={props.min}
         max={props.max}
         step={props.step ?? 1}
+        disabled={props.disabled}
         onChange={(event) => {
           props.onChange(Number(event.target.value));
         }}
@@ -421,6 +423,7 @@ export function OptionalNumberField(props: {
   min: number;
   max: number;
   step?: number;
+  disabled?: boolean;
   onChange: (value: number | undefined) => void;
 }) {
   return (
@@ -432,6 +435,7 @@ export function OptionalNumberField(props: {
         min={props.min}
         max={props.max}
         step={props.step ?? 1}
+        disabled={props.disabled}
         onChange={(event) => {
           const value = event.target.value.trim();
           props.onChange(value === "" ? undefined : Number(value));

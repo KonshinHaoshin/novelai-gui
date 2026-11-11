@@ -124,7 +124,18 @@ import {
   requestToPromise,
   transactionDone,
   sortHistory,
+  mediumEffortActive,
 } from "./helpers";
+import {
+  QUALITY_PRESET_LABEL,
+  TAG_HINT,
+  UC_PRESET_LABEL,
+  V5_COMPLEXITY_TAGS,
+  availableUcPresets,
+  maxCharactersForModel,
+  mediumEffortForModel,
+  type QualityPresetId,
+} from "./modelProfiles";
 import type {
   ImageAction,
   ImageFormat,
@@ -448,6 +459,9 @@ function App() {
   }, [styleTemplatePageCount]);
 
   const estimatedCost = useMemo(() => estimateAnlasCost(request, account), [request, account]);
+  // Medium effort pins steps/sampler/UC/CFG rescale, so the related controls lock.
+  const mediumPinned = mediumEffortActive(request);
+  const characterLimit = maxCharactersForModel(request.model);
   const generationProgressPercent = generationProgress
     ? Math.min(100, Math.round((generationProgress.received / Math.max(generationProgress.total, 1)) * 100))
     : 0;
@@ -1149,6 +1163,15 @@ function App() {
 
   function addCharacter() {
     const characters = request.characters ?? [];
+    // V5 allows 22 characters, V4/V4.5 allow 6, older checkpoints none.
+    if (characterLimit <= 0) {
+      showNotice("info", "当前模型不支持多角色提示词，请切换到 V4 / V4.5 / V5。");
+      return;
+    }
+    if (characters.length >= characterLimit) {
+      showNotice("info", `该模型最多支持 ${characterLimit} 个角色。`);
+      return;
+    }
     const index = characters.length;
     const nextCharacter: CharacterPrompt = {
       id: crypto.randomUUID(),
@@ -1722,6 +1745,9 @@ function App() {
                 if (!isV5ImageModel(model)) {
                   update("transparentBackground", false);
                 }
+                if (!mediumEffortForModel(model)) {
+                  update("effort", "high");
+                }
               }}
             >
               {MODELS.map((model) => (
@@ -1731,6 +1757,25 @@ function App() {
               ))}
             </select>
           </label>
+          {mediumEffortForModel(request.model) ? (
+            <>
+              <label className="field">
+                <span>Effort 档位</span>
+                <select
+                  value={request.effort}
+                  onChange={(event) => update("effort", event.target.value === "medium" ? "medium" : "high")}
+                >
+                  <option value="high">High · 完整模型</option>
+                  <option value="medium">Medium · 省 42% Anlas</option>
+                </select>
+              </label>
+              {request.effort === "medium" ? (
+                <p className="field-note">
+                  Medium 固定 14 步 + Euler Ancestral + Heavy UC，不支持自定义负向提示与 CFG 重缩放；需要移除元素时可用负向强调（如 -3::hat::）。
+                </p>
+              ) : null}
+            </>
+          ) : null}
         </section>
 
         <section className="parameter-card size-card">
@@ -2005,6 +2050,33 @@ function App() {
               {isV5ImageModel(request.model) ? "V5 专用" : "仅 V5 支持"}
             </span>
           </div>
+          {isV5ImageModel(request.model) ? (
+            <div className="tag-chip-row">
+              <span className="tag-chip-label">复杂度</span>
+              {V5_COMPLEXITY_TAGS.map((tag) => (
+                <button
+                  key={tag}
+                  className="chip"
+                  type="button"
+                  onClick={() => update("prompt", appendPromptText(request.prompt, tag))}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <label className="prompt-inline-field">
+            <span>图内文字</span>
+            <input
+              value={request.inImageText ?? ""}
+              onChange={(event) => update("inImageText", event.target.value)}
+              placeholder="渲染到图里的文字，V4+ 支持英/日/中，例如 HELLO WORLD"
+              maxLength={200}
+            />
+          </label>
+          <p className="field-note">
+            图内文字会以独立的 <code>Text:</code> 段追加到提示词末尾，约 750 token 上限。
+          </p>
         </section>
 
         <section className="prompt-card compact">
@@ -2417,7 +2489,10 @@ function App() {
               Characters
             </span>
             {(request.characters ?? []).length > 0 ? (
-              <span className="section-meta">{(request.characters ?? []).length}</span>
+              <span className="section-meta">
+                {(request.characters ?? []).length}
+                {characterLimit > 0 ? `/${characterLimit}` : ""}
+              </span>
             ) : null}
             <ChevronDown className={characterOpen ? "open" : ""} aria-hidden="true" />
           </button>
@@ -2436,7 +2511,13 @@ function App() {
                     checked={request.useCharacterCoords}
                     onChange={(value) => update("useCharacterCoords", value)}
                   />
-                  <button className="ghost-button" onClick={addCharacter} type="button">
+                  <button
+                    className="ghost-button"
+                    onClick={addCharacter}
+                    disabled={characterLimit > 0 && (request.characters ?? []).length >= characterLimit}
+                    title={characterLimit > 0 ? `最多 ${characterLimit} 个角色` : undefined}
+                    type="button"
+                  >
                     <UserPlus aria-hidden="true" />
                     添加
                   </button>
@@ -2576,18 +2657,36 @@ function App() {
                   </select>
                 </label>
                 <label className="field">
-                  <span>反向预设（UCPRESET）</span>
-                  <select value={request.ucPreset} onChange={(event) => update("ucPreset", Number(event.target.value))}>
-                    <option value={0}>0 · None</option>
-                    <option value={1}>1 · Light</option>
-                    <option value={2}>2 · Heavy</option>
-                    <option value={3}>3 · Human Focus</option>
+                  <span>反向预设（UC）</span>
+                  <select
+                    value={request.ucPreset}
+                    disabled={mediumPinned}
+                    title={mediumPinned ? "Medium 固定使用 Heavy UC" : undefined}
+                    onChange={(event) => update("ucPreset", Number(event.target.value))}
+                  >
+                    {availableUcPresets(request.model).map((id) => (
+                      <option key={id} value={TAG_HINT[id]}>
+                        {UC_PRESET_LABEL[id]}
+                      </option>
+                    ))}
                   </select>
                 </label>
-                <NumberField label="CFG 重缩放" value={request.cfgRescale} min={0} max={1} step={0.01} onChange={(value) => update("cfgRescale", value)} />
+                <label className="field">
+                  <span>质量标签</span>
+                  <select
+                    value={request.qualityPreset}
+                    onChange={(event) => update("qualityPreset", Number(event.target.value))}
+                  >
+                    {([["standard", TAG_HINT.standard], ["light", TAG_HINT.light], ["none", TAG_HINT.none]] as [QualityPresetId, number][]).map(([id, value]) => (
+                      <option key={id} value={value}>
+                        {QUALITY_PRESET_LABEL[id]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <NumberField label="CFG 重缩放" value={request.cfgRescale} min={0} max={1} step={0.01} disabled={mediumPinned} onChange={(value) => update("cfgRescale", value)} />
                 <NumberField label="采样数" value={request.nSamples} min={1} max={8} onChange={(value) => update("nSamples", value)} />
                 <OptionalNumberField label="Skip Sigma" value={request.skipCfgAboveSigma} min={0} max={100} step={0.1} onChange={(value) => update("skipCfgAboveSigma", value)} />
-                <OptionalNumberField label="Tag Hint QT" value={request.tagHintQt} min={0} max={100} onChange={(value) => update("tagHintQt", value)} />
                 <label className="field">
                   <span>生成时 Upscale 模糊参考</span>
                   <select value={request.upscaleBlurSigma ?? ""} onChange={(event) => update("upscaleBlurSigma", event.target.value === "" ? undefined : Number(event.target.value))}>
@@ -2599,7 +2698,6 @@ function App() {
               </div>
 
               <div className="toggle-grid">
-                <Toggle label="质量优化" checked={request.qualityToggle} onChange={(value) => update("qualityToggle", value)} />
                 <Toggle label="SMEA" checked={request.sm} onChange={(value) => update("sm", value)} />
                 <Toggle label="SMEA 动态" checked={request.smDyn} onChange={(value) => update("smDyn", value)} />
                 <Toggle label="动态阈值" checked={request.dynamicThresholding} onChange={(value) => update("dynamicThresholding", value)} />

@@ -24,7 +24,16 @@ export type ImageRequest = {
   imageFormat: ImageFormat;
   qualityToggle: boolean;
   transparentBackground: boolean;
+  /** Official tag_hint_uc_preset numbering: 0 None, 2 Heavy, 3 Light, 4 Human Focus, 5 Furry Focus. */
   ucPreset: number;
+  /** Official tag_hint_qt numbering: 0 None, 1 Standard, 3 Light. */
+  qualityPreset: number;
+  /** "medium" runs V5 Full on the distilled checkpoint (saves ~42% Anlas). */
+  effort: "high" | "medium";
+  /** 1 = current ucPreset/qualityPreset numbering; absent = legacy scheme. */
+  paramScheme?: number;
+  /** Rendered in-image via a trailing "Text:" block (V4+ models). */
+  inImageText?: string;
   paramsVersion: number;
   dynamicThresholding: boolean;
   sm: boolean;
@@ -34,7 +43,6 @@ export type ImageRequest = {
   preferBrownian: boolean;
   addOriginalImage: boolean;
   legacyV3Extend: boolean;
-  tagHintQt?: number;
   upscaleBlurSigma?: number;
   upscaledEnhance: boolean;
   sourceImage?: ImageAsset;

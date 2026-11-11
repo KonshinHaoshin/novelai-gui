@@ -8,6 +8,7 @@ import {
   HISTORY_KEY,
   HISTORY_STORE_NAME,
   FAVORITES_STORE_NAME,
+  LEGACY_DEFAULT_NEGATIVE_PROMPT,
   LEGACY_DEFAULT_NOVELAI_PROXY_URL,
   MAX_HISTORY_ITEMS,
   MODELS,
@@ -17,6 +18,19 @@ import {
   SIZE_PRESETS,
   UPSCALE_BLUR_SIGMAS,
 } from "./constants";
+import {
+  TAG_HINT,
+  baseModelId,
+  defaultStepsForModel,
+  legacyUcIndexToOfficial,
+  maxCharactersForModel,
+  mediumEffortForModel,
+  modelProfile,
+  paramsVersionForModel,
+  qualityAtStart,
+  qualityTagsFor,
+  ucPresetText,
+} from "./modelProfiles";
 import type {
   AccountSummary,
   AnlasEstimate,
@@ -296,14 +310,44 @@ export function normalizePromptPart(value: string) {
 export function effectivePrompt(request: ImageRequest) {
   const style = request.stylePrompt.trim();
   const main = request.prompt.trim();
-  const prompt = style && main ? `${style}, ${main}` : style || main;
+  let prompt = style && main ? `${style}, ${main}` : style || main;
 
   if (request.transparentBackground && request.action !== "infill" && isV5ImageModel(request.model) && prompt.trim()) {
     const hasTransparencyTag = splitPromptParts(prompt).some((part) => normalizePromptPart(part) === "transparent background");
-    return hasTransparencyTag ? prompt : appendPromptText(prompt, "transparent background");
+    prompt = hasTransparencyTag ? prompt : appendPromptText(prompt, "transparent background");
+  }
+
+  const quality = qualityTagsFor(request.model, request.qualityPreset);
+  if (quality) {
+    prompt = qualityAtStart(request.model) && prompt
+      ? `${quality}, ${prompt}`
+      : prompt ? `${prompt}, ${quality}` : quality;
+  }
+
+  // Official in-image text rendering: a "Text:" block on its own line at the
+  // very end of the prompt (V4+ models, see docs.novelai.net image/textrendering).
+  const inImageText = request.inImageText?.trim();
+  if (inImageText && isModernImageModel(request.model)) {
+    prompt = `${prompt}\nText: ${inImageText}`;
   }
 
   return prompt;
+}
+
+/** UC preset text (hidden injection) plus the user's custom negative prompt. */
+export function effectiveNegativePrompt(request: ImageRequest) {
+  if (mediumEffortActive(request)) {
+    // Medium effort pins the Heavy preset and forbids custom UC text.
+    return ucPresetText(request.model, TAG_HINT.heavy);
+  }
+  const preset = ucPresetText(request.model, request.ucPreset);
+  const custom = request.negativePrompt.trim();
+  return preset && custom ? `${preset}, ${custom}` : preset || custom;
+}
+
+/** True when the request runs on a Medium effort checkpoint (V5 Full only). */
+export function mediumEffortActive(request: Pick<ImageRequest, "model" | "effort">) {
+  return request.effort === "medium" && Boolean(mediumEffortForModel(request.model));
 }
 
 export function isTauriRuntime() {
@@ -584,24 +628,25 @@ export function formatBytes(bytes: number) {
 }
 
 export function buildPayloadPreview(request: ImageRequest) {
+  const medium = mediumEffortActive(request);
   const parameters: Record<string, unknown> = {
     width: request.width,
     height: request.height,
     prompt: effectivePrompt(request),
-    negative_prompt: request.negativePrompt,
+    negative_prompt: effectiveNegativePrompt(request),
     n_samples: request.nSamples,
-    steps: request.steps,
+    steps: medium ? 14 : request.steps,
     scale: request.scale,
-    cfg_rescale: request.cfgRescale,
-    sampler: request.sampler,
+    cfg_rescale: medium ? 0 : request.cfgRescale,
+    sampler: medium ? "k_euler_ancestral" : request.sampler,
     noise_schedule: request.noiseSchedule,
     seed: request.seed,
     image_format: request.imageFormat,
     qualityToggle: request.qualityToggle,
-    tag_hint_uc_preset: request.ucPreset,
+    tag_hint_uc_preset: medium ? TAG_HINT.heavy : request.ucPreset,
     tag_hint_transparent_background: request.transparentBackground && request.action !== "infill",
     straight_alpha: request.transparentBackground && request.action !== "infill",
-    ucPreset: request.ucPreset,
+    ucPreset: medium ? TAG_HINT.heavy : request.ucPreset,
     params_version: request.paramsVersion,
     dynamic_thresholding: request.dynamicThresholding,
     sm: request.sm,
@@ -611,7 +656,7 @@ export function buildPayloadPreview(request: ImageRequest) {
     prefer_brownian: request.preferBrownian,
     add_original_image: request.addOriginalImage,
     legacy_v3_extend: request.legacyV3Extend,
-    tag_hint_qt: request.tagHintQt,
+    tag_hint_qt: request.qualityPreset,
     upscaled_enhance: request.upscaledEnhance,
   };
 
@@ -718,6 +763,7 @@ export async function buildBackendImageRequest(request: ImageRequest, settings: 
   return {
     ...request,
     prompt: effectivePrompt(request),
+    negativePrompt: effectiveNegativePrompt(request),
     allowInvalidTls: settings.allowInvalidTls,
     proxyUrl: activeNovelAiProxyUrl(settings),
     model: effectiveImageModel(request),
@@ -738,6 +784,14 @@ export function activeNovelAiProxyUrl(settings: AppSettings) {
 }
 
 export function effectiveImageModel(request: ImageRequest) {
+  // Medium effort swaps in the distilled checkpoints before any infill mapping.
+  if (mediumEffortActive(request)) {
+    const medium = mediumEffortForModel(request.model);
+    if (medium) {
+      return request.action === "infill" ? medium.inpaintingId : medium.id;
+    }
+  }
+
   if (request.action !== "infill" || request.model.includes("inpainting")) {
     return request.model;
   }
@@ -766,14 +820,10 @@ export function isV5ImageModel(model: string) {
 }
 
 export function defaultStepsForImageModel(model: string) {
-  if (isV5ImageModel(model)) {
-    return 23;
-  }
-  if (model.includes("diffusion-4-5")) {
-    return 28;
-  }
-  return undefined;
+  return defaultStepsForModel(model);
 }
+
+export { maxCharactersForModel };
 
 export function getUpscaleModel(model: string) {
   const normalized = model.replace(/-inpainting$/, "");
@@ -791,9 +841,34 @@ export function buildCharacterCaptions(request: ImageRequest) {
 }
 
 export function normalizeImageRequest(request: ImageRequest): ImageRequest {
+  // Requests saved before the official tag-hint numbering / UC preset
+  // injection carry legacy numbers and inline preset text.
+  const legacyScheme = (request as { paramScheme?: unknown }).paramScheme !== 1;
+  const model = baseModelId(request.model || DEFAULT_REQUEST.model);
+  const profile = modelProfile(model);
+
+  const negativePrompt = legacyScheme && request.negativePrompt === LEGACY_DEFAULT_NEGATIVE_PROMPT
+    ? ""
+    : request.negativePrompt;
+
   return {
     ...DEFAULT_REQUEST,
     ...request,
+    model,
+    negativePrompt,
+    // Legacy requests were built before quality tags were injected client-side.
+    qualityPreset: legacyScheme
+      ? (request.qualityToggle === false ? TAG_HINT.none : TAG_HINT.standard)
+      : request.qualityPreset ?? DEFAULT_REQUEST.qualityPreset,
+    ucPreset: legacyScheme
+      ? legacyUcIndexToOfficial(request.ucPreset)
+      : request.ucPreset ?? DEFAULT_REQUEST.ucPreset,
+    effort: request.effort === "medium" && mediumEffortForModel(model) ? "medium" : "high",
+    paramScheme: 1,
+    inImageText: request.inImageText ?? "",
+    paramsVersion: legacyScheme
+      ? profile?.paramsVersion ?? paramsVersionForModel(model)
+      : request.paramsVersion ?? paramsVersionForModel(model),
     characters: (request.characters ?? []).map((character) => ({
       id: character.id || crypto.randomUUID(),
       prompt: character.prompt ?? "",
@@ -802,7 +877,7 @@ export function normalizeImageRequest(request: ImageRequest): ImageRequest {
       y: clampCoordinate(character.y),
     })),
     useCharacterCoords: request.useCharacterCoords ?? false,
-    transparentBackground: isV5ImageModel(request.model ?? DEFAULT_REQUEST.model)
+    transparentBackground: isV5ImageModel(model)
       ? request.transparentBackground ?? DEFAULT_REQUEST.transparentBackground
       : false,
     strength: clamp01(request.strength ?? DEFAULT_REQUEST.strength),
@@ -967,7 +1042,8 @@ export function estimateAnlasCost(request: ImageRequest, account: AccountSummary
 
   const width = Number(request.width);
   const height = Number(request.height);
-  const steps = Number(request.steps);
+  const medium = mediumEffortActive(request);
+  const steps = medium ? 14 : Number(request.steps);
   const samples = Math.max(1, Math.floor(Number(request.nSamples)));
   if (![width, height, steps].every(Number.isFinite) || width <= 0 || height <= 0 || steps <= 0) {
     return null;
@@ -977,7 +1053,7 @@ export function estimateAnlasCost(request: ImageRequest, account: AccountSummary
   const baseCost = Math.ceil(
     2.951823174884865e-6 * area + 5.753298233447344e-7 * area * steps,
   );
-  const smeaMultiplier = request.sm ? (request.smDyn ? 1.4 : 1.2) : 1;
+  const smeaMultiplier = medium ? 1 : request.sm ? (request.smDyn ? 1.4 : 1.2) : 1;
   const strengthFactor =
     request.action === "infill" && request.maskImage
       ? 1

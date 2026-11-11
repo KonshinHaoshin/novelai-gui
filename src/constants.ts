@@ -1,4 +1,5 @@
 // Shared constants for the NovelAI GUI frontend.
+import { TAG_HINT } from "./modelProfiles";
 import type { AppSettings, ImageRequest } from "./types";
 
 export const TOKEN_NOT_CONFIGURED_ERROR = "API Token is not configured";
@@ -21,24 +22,19 @@ export const MAX_HISTORY_ITEMS = 40;
 
 export const LEGACY_DEFAULT_NOVELAI_PROXY_URL = "http://127.0.0.1:7897";
 
+/** Base models only; inpainting checkpoints are swapped in by action. */
 export const MODELS = [
   "nai-diffusion-5-full",
   "nai-diffusion-5-curated",
   "nai-diffusion-4-5-full",
   "nai-diffusion-4-5-curated",
-  "nai-diffusion-4-5-full-inpainting",
-  "nai-diffusion-4-5-curated-inpainting",
   "nai-diffusion-4-full",
-  "nai-diffusion-4-full-inpainting",
+  "nai-diffusion-4-curated-preview",
   "nai-diffusion-3",
   "nai-diffusion-2",
   "nai-diffusion",
   "safe-diffusion",
   "nai-diffusion-furry",
-  "nai-diffusion-inpainting",
-  "nai-diffusion-3-inpainting",
-  "safe-diffusion-inpainting",
-  "furry-diffusion-inpainting",
   "kandinsky-vanilla",
   "custom",
 ];
@@ -84,18 +80,22 @@ export const DEFAULT_SETTINGS: AppSettings = {
   useImageStream: true,
 };
 
+/** The pre-2025-11 default UC blob; cleared during migration (now a preset). */
+export const LEGACY_DEFAULT_NEGATIVE_PROMPT =
+  "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, @_@, mismatched pupils, glowing eyes, bad anatomy, multiple views, building, city, blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, bad quality, very displeasing, chromatic aberration, logo, dated, signature, multiple views, gigantic breasts, nun, pov, pubic hair, wolf, animal, chibi, doll, milk, lowres, bad, error, fewer, extra, missing, worst quality, jpeg artifacts, bad quality, watermark, unfinished, displeasing, chromatic aberration, signature, extra digits, artistic error, username, scan, abstract, very displeasing, displeasing, lowres, lowres, bad, text, error, missing, extra, fewer, cropped, jpeg artifacts, worst quality, bad quality, watermark, displeasing, unfinished, chromatic aberration, scan, scan artifacts, photo, deformed, realism, disfigured, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, nsfw, :(mutated hands and fingers, one hand with more than 5 fingers, one hand with less than 5 fingers):0.8, text,";
+
 export const DEFAULT_REQUEST: ImageRequest = {
   stylePrompt: "",
   prompt: "",
-  negativePrompt: "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, @_@, mismatched pupils, glowing eyes, bad anatomy, multiple views, building, city, blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, bad quality, very displeasing, chromatic aberration, logo, dated, signature, multiple views, gigantic breasts, nun, pov, pubic hair, wolf, animal, chibi, doll, milk, lowres, bad, error, fewer, extra, missing, worst quality, jpeg artifacts, bad quality, watermark, unfinished, displeasing, chromatic aberration, signature, extra digits, artistic error, username, scan, abstract, very displeasing, displeasing, lowres, lowres, bad, text, error, missing, extra, fewer, cropped, jpeg artifacts, worst quality, bad quality, watermark, displeasing, unfinished, chromatic aberration, scan, scan artifacts, photo, deformed, realism, disfigured, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, nsfw, :(mutated hands and fingers, one hand with more than 5 fingers, one hand with less than 5 fingers):0.8, text,",
+  negativePrompt: "",
   characters: [],
   useCharacterCoords: false,
-  model: "nai-diffusion-4-5-full",
+  model: "nai-diffusion-5-full",
   action: "generate",
   width: 832,
   height: 1216,
   nSamples: 1,
-  steps: 28,
+  steps: 23,
   scale: 5,
   cfgRescale: 0,
   sampler: "k_euler_ancestral",
@@ -103,8 +103,13 @@ export const DEFAULT_REQUEST: ImageRequest = {
   imageFormat: "png",
   qualityToggle: true,
   transparentBackground: false,
-  ucPreset: 0,
-  paramsVersion: 3,
+  // Official tag_hint numbering (0 None, 2 Heavy, 3 Light, 4 Human Focus, 5 Furry Focus).
+  ucPreset: TAG_HINT.heavy,
+  qualityPreset: TAG_HINT.standard,
+  effort: "high",
+  paramScheme: 1,
+  inImageText: "",
+  paramsVersion: 4,
   dynamicThresholding: false,
   sm: false,
   smDyn: false,
