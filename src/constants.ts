@@ -74,9 +74,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   novelAiProxyUrl: "",
   saveDirectory: "",
   historyDisplayLimit: 8,
-  translationBaseUrl: "",
-  translationApiKey: "",
-  translationModel: "",
   useImageStream: true,
 };
 

@@ -48,7 +48,6 @@ import {
   NumberField,
   OptionalNumberField,
   Toggle,
-  TranslateButtons,
   AssetPicker,
   MultiAssetPicker,
   ClipboardImageChoiceModal,
@@ -56,13 +55,7 @@ import {
 } from "./components";
 import {
   growMaskSelection,
-  buildTranslationSystemPrompt,
-  buildTranslationUserPrompt,
   loadSettings,
-  buildOpenAiChatCompletionsUrl,
-  parseOpenAiChatResponseText,
-  extractOpenAiChoiceText,
-  normalizeServerUrl,
   appendPromptText,
   removePromptText,
   splitPromptParts,
@@ -152,7 +145,6 @@ import type {
   FavoriteItem,
   PersistedHistoryItem,
   Notice,
-  TranslationDirection,
   AppSettings,
   AccountSummary,
   AnlasEstimate,
@@ -262,7 +254,6 @@ function App() {
   const maskImageInputRef = useRef<HTMLInputElement | null>(null);
   const vibeImageInputRef = useRef<HTMLInputElement | null>(null);
   const directorImageInputRef = useRef<HTMLInputElement | null>(null);
-  const [translatingField, setTranslatingField] = useState<string | null>(null);
   const [tagQuery, setTagQuery] = useState("");
   const [tagSuggestions, setTagSuggestions] = useState<TagSuggestion[]>([]);
   const [isSuggestingTags, setIsSuggestingTags] = useState(false);
@@ -1211,91 +1202,6 @@ function App() {
     );
   }
 
-  async function translatePromptField(field: "prompt" | "negativePrompt" | "stylePrompt", direction: TranslationDirection) {
-    const text = request[field].trim();
-    if (!text) {
-      showNotice("info", "没有可翻译的提示词。");
-      return;
-    }
-
-    const translationKey = `${field}:${direction}`;
-    setTranslatingField(translationKey);
-    try {
-      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive", direction);
-      update(field, translated as ImageRequest[typeof field]);
-      showNotice("success", direction === "zh-to-en-tags" ? "提示词已转为英文 tag。" : "提示词已翻译为中文。");
-    } catch (error) {
-      showNotice("error", errorMessage(error));
-    } finally {
-      setTranslatingField(null);
-    }
-  }
-
-  async function translateCharacterPrompt(id: string, field: "prompt" | "negativePrompt", direction: TranslationDirection) {
-    const character = (request.characters ?? []).find((item) => item.id === id);
-    const text = character?.[field]?.trim() ?? "";
-    if (!text) {
-      showNotice("info", "没有可翻译的角色提示词。");
-      return;
-    }
-
-    const translationKey = `character:${id}:${field}:${direction}`;
-    setTranslatingField(translationKey);
-    try {
-      const translated = await translatePromptText(text, field === "negativePrompt" ? "negative" : "positive", direction);
-      updateCharacter(id, field, translated);
-      showNotice("success", direction === "zh-to-en-tags" ? "角色提示词已转为英文 tag。" : "角色提示词已翻译为中文。");
-    } catch (error) {
-      showNotice("error", errorMessage(error));
-    } finally {
-      setTranslatingField(null);
-    }
-  }
-
-  async function translatePromptText(text: string, kind: "positive" | "negative", direction: TranslationDirection) {
-    const endpoint = buildOpenAiChatCompletionsUrl(settings.translationBaseUrl);
-    if (!endpoint || !settings.translationApiKey.trim() || !settings.translationModel.trim()) {
-      throw new Error("请先在设置里配置翻译模型的网址、API Key 和模型名。");
-    }
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${settings.translationApiKey.trim()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: settings.translationModel.trim(),
-        temperature: 0.2,
-        messages: [
-          {
-            role: "system",
-            content: buildTranslationSystemPrompt(direction, kind),
-          },
-          {
-            role: "user",
-            content: buildTranslationUserPrompt(text, direction, kind),
-          },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`翻译请求失败：HTTP ${response.status}`);
-    }
-
-    const responseText = await response.text();
-    const translated = parseOpenAiChatResponseText(responseText);
-    if (!translated) {
-      throw new Error("翻译模型没有返回有效文本。");
-    }
-    return translated
-      .replace(/[，、；]/g, ", ")
-      .replace(/\s*,\s*/g, ", ")
-      .replace(/^["'`]+|["'`]+$/g, "")
-      .trim();
-  }
-
   function clearHistory() {
     if (history.length > 0 && !window.confirm("确定要清空全部历史记录吗？此操作无法撤销。")) {
       return;
@@ -1949,13 +1855,6 @@ function App() {
                 <ChevronDown className="open" aria-hidden="true" />
               </button>
               <div className="prompt-actions style-prompt-actions">
-                <TranslateButtons
-                  disabled={translatingField !== null || !request.stylePrompt.trim()}
-                  enActive={translatingField === "stylePrompt:zh-to-en-tags"}
-                  zhActive={translatingField === "stylePrompt:en-to-zh"}
-                  onEnglish={() => void translatePromptField("stylePrompt", "zh-to-en-tags")}
-                  onChinese={() => void translatePromptField("stylePrompt", "en-to-zh")}
-                />
                 <span>{request.stylePrompt.length}</span>
               </div>
             </div>
@@ -2032,13 +1931,6 @@ function App() {
               <h2>正向提示词</h2>
             </div>
             <div className="prompt-actions">
-              <TranslateButtons
-                disabled={translatingField !== null || !request.prompt.trim()}
-                enActive={translatingField === "prompt:zh-to-en-tags"}
-                zhActive={translatingField === "prompt:en-to-zh"}
-                onEnglish={() => void translatePromptField("prompt", "zh-to-en-tags")}
-                onChinese={() => void translatePromptField("prompt", "en-to-zh")}
-              />
               <span>{request.prompt.length}</span>
             </div>
           </div>
@@ -2099,13 +1991,6 @@ function App() {
               <h2>负向提示词</h2>
             </div>
             <div className="prompt-actions">
-              <TranslateButtons
-                disabled={translatingField !== null || !request.negativePrompt.trim()}
-                enActive={translatingField === "negativePrompt:zh-to-en-tags"}
-                zhActive={translatingField === "negativePrompt:en-to-zh"}
-                onEnglish={() => void translatePromptField("negativePrompt", "zh-to-en-tags")}
-                onChinese={() => void translatePromptField("negativePrompt", "en-to-zh")}
-              />
               <span>{request.negativePrompt.length}</span>
             </div>
           </div>
@@ -2573,14 +2458,6 @@ function App() {
                               <label className="field">
                                 <span className="field-label-row">
                                   角色提示词
-                                  <TranslateButtons
-                                    compact
-                                    disabled={translatingField !== null || !character.prompt.trim()}
-                                    enActive={translatingField === `character:${character.id}:prompt:zh-to-en-tags`}
-                                    zhActive={translatingField === `character:${character.id}:prompt:en-to-zh`}
-                                    onEnglish={() => void translateCharacterPrompt(character.id, "prompt", "zh-to-en-tags")}
-                                    onChinese={() => void translateCharacterPrompt(character.id, "prompt", "en-to-zh")}
-                                  />
                                 </span>
                                 <textarea
                                   value={character.prompt}
@@ -2592,14 +2469,6 @@ function App() {
                               <label className="field">
                                 <span className="field-label-row">
                                   角色负向提示词
-                                  <TranslateButtons
-                                    compact
-                                    disabled={translatingField !== null || !character.negativePrompt.trim()}
-                                    enActive={translatingField === `character:${character.id}:negativePrompt:zh-to-en-tags`}
-                                    zhActive={translatingField === `character:${character.id}:negativePrompt:en-to-zh`}
-                                    onEnglish={() => void translateCharacterPrompt(character.id, "negativePrompt", "zh-to-en-tags")}
-                                    onChinese={() => void translateCharacterPrompt(character.id, "negativePrompt", "en-to-zh")}
-                                  />
                                 </span>
                                 <textarea
                                   value={character.negativePrompt}
@@ -2979,40 +2848,6 @@ function App() {
                     <Eraser aria-hidden="true" />
                   </button>
                 ) : null}
-              </div>
-            </section>
-
-            <section className="settings-panel wide settings-translation-panel">
-              <div className="section-head">
-                <WandSparkles aria-hidden="true" />
-                <h2>AI 翻译</h2>
-              </div>
-              <div className="settings-stack">
-                <label className="field">
-                  <span>OpenAI 兼容接口地址</span>
-                  <input
-                    value={settings.translationBaseUrl}
-                    onChange={(event) => updateSetting("translationBaseUrl", event.target.value)}
-                    placeholder="https://api.openai.com/v1"
-                  />
-                </label>
-                <label className="field">
-                  <span>API Key</span>
-                  <input
-                    value={settings.translationApiKey}
-                    onChange={(event) => updateSetting("translationApiKey", event.target.value)}
-                    placeholder="sk-..."
-                    type="password"
-                  />
-                </label>
-                <label className="field">
-                  <span>模型</span>
-                  <input
-                    value={settings.translationModel}
-                    onChange={(event) => updateSetting("translationModel", event.target.value)}
-                    placeholder="gpt-4o-mini 或其他兼容模型"
-                  />
-                </label>
               </div>
             </section>
 

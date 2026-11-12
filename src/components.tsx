@@ -1,7 +1,7 @@
 // Presentational components shared by the workbench panels.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Braces, ChevronLeft, ChevronRight, Copy, Download, Eraser, FolderOpen, Heart, History as HistoryIcon, ImagePlus, Images, Loader2, MoreHorizontal, Pencil, RefreshCw, Trash2, WandSparkles, X } from "lucide-react";
+import { Braces, ChevronLeft, ChevronRight, Copy, Download, Eraser, FolderOpen, Heart, History as HistoryIcon, ImagePlus, Images, MoreHorizontal, Pencil, RefreshCw, Trash2, WandSparkles, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import type {
@@ -456,38 +456,6 @@ export function Toggle(props: { label: string; checked: boolean; onChange: (valu
       />
       <span>{props.label}</span>
     </label>
-  );
-}
-
-export function TranslateButtons(props: {
-  disabled: boolean;
-  enActive: boolean;
-  zhActive: boolean;
-  compact?: boolean;
-  onEnglish: () => void;
-  onChinese: () => void;
-}) {
-  return (
-    <span className={props.compact ? "translate-mini compact" : "translate-mini"}>
-      <button
-        disabled={props.disabled}
-        onClick={props.onEnglish}
-        title="中译英 Tag"
-        type="button"
-      >
-        {props.enActive ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
-        <b>EN</b>
-      </button>
-      <button
-        disabled={props.disabled}
-        onClick={props.onChinese}
-        title="英译中"
-        type="button"
-      >
-        {props.zhActive ? <Loader2 className="spin" aria-hidden="true" /> : <WandSparkles aria-hidden="true" />}
-        <b>中</b>
-      </button>
-    </span>
   );
 }
 

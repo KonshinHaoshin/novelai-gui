@@ -20,6 +20,8 @@ pub mod cli;
 pub mod gateway;
 #[cfg(feature = "cli")]
 mod image_metadata;
+#[cfg(feature = "cli")]
+pub mod model_profiles;
 pub mod opencode;
 mod tool_adapter;
 
@@ -289,8 +291,24 @@ fn remember_token(token: &str) {
     }
 }
 
-#[tauri::command]
-async fn has_api_token() -> Result<bool, AppError> {
+/// Cache a token read from the keyring without overwriting a value that a
+/// concurrent `save_api_token` just stored.
+fn remember_token_if_missing(token: &str) {
+    if let Ok(mut cache) = token_cache().lock() {
+        if cache.as_ref().is_none_or(|cached| cached.trim().is_empty()) {
+            *cache = Some(token.to_string());
+        }
+    }
+}
+
+fn environment_token() -> Option<String> {
+    std::env::var("NOVELAI_API_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+async fn saved_token_exists() -> Result<bool, AppError> {
     if cached_token().is_some() {
         return Ok(true);
     }
@@ -299,7 +317,7 @@ async fn has_api_token() -> Result<bool, AppError> {
         let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
         match entry.get_password() {
             Ok(token) if !token.trim().is_empty() => {
-                remember_token(&token);
+                remember_token_if_missing(&token);
                 Ok(true)
             }
             Ok(_) | Err(keyring::Error::NoEntry) => Ok(false),
@@ -309,6 +327,20 @@ async fn has_api_token() -> Result<bool, AppError> {
     .await
     .map_err(to_error)?
     .map_err(AppError::from)
+}
+
+#[tauri::command]
+async fn has_api_token() -> Result<bool, AppError> {
+    if environment_token().is_some() {
+        return Ok(true);
+    }
+    saved_token_exists().await
+}
+
+/// Whether a token is stored in the OS keyring, ignoring `NOVELAI_API_TOKEN`.
+/// Used by `novelai-cli token status` so the two sources stay distinguishable.
+pub async fn has_saved_api_token() -> Result<bool, AppError> {
+    saved_token_exists().await
 }
 
 #[tauri::command]
@@ -1725,6 +1757,9 @@ fn save_inpaint_diagnostics_sync(diagnostic: InpaintDiagnostic) -> Result<String
 }
 
 fn read_token() -> Result<String, AppError> {
+    if let Some(token) = environment_token() {
+        return Ok(token);
+    }
     if let Some(token) = cached_token() {
         return Ok(token);
     }
@@ -1732,7 +1767,7 @@ fn read_token() -> Result<String, AppError> {
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
     match entry.get_password() {
         Ok(token) if !token.trim().is_empty() => {
-            remember_token(&token);
+            remember_token_if_missing(&token);
             Ok(token)
         }
         Ok(_) | Err(keyring::Error::NoEntry) => Err(AppError::new(
@@ -2352,6 +2387,7 @@ fn effective_image_model(model: &str, action: &str) -> String {
 
     match model {
         "nai-diffusion-5-full" => "nai-diffusion-5-full-inpainting",
+        "nai-diffusion-5-full-medium" => "nai-diffusion-5-full-medium-inpainting",
         "nai-diffusion-5-curated" => "nai-diffusion-4-5-curated-inpainting",
         "nai-diffusion-4-5-full" => "nai-diffusion-4-5-full-inpainting",
         "nai-diffusion-4-5-curated" => "nai-diffusion-4-5-curated-inpainting",

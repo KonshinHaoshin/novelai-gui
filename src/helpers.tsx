@@ -45,7 +45,6 @@ import type {
   ImageRequest,
   PersistedHistoryItem,
   TagSuggestion,
-  TranslationDirection,
 } from "./types";
 import { clamp01, clampCoordinate, findBooleanByKeys, findNumberByKeys, findStringByKeys, isRecord } from "./valueUtils";
 import { errorMessage, errorCode } from "./errors";
@@ -86,62 +85,6 @@ export function growMaskSelection(source: Uint8Array, width: number, height: num
   return output;
 }
 
-export function buildTranslationSystemPrompt(direction: TranslationDirection, kind: "positive" | "negative") {
-  if (direction === "en-to-zh") {
-    return [
-      "你是图像生成 prompt 翻译器。",
-      "把英文 NovelAI / Stable Diffusion / WebUI 风格 tag 翻译成自然、简洁的中文说明。",
-      "保留专有名词、画师名、模型名和无法可靠翻译的英文 tag。",
-      "不要解释，不要加前后缀，只输出翻译后的中文文本。",
-    ].join("\n");
-  }
-
-  const examples =
-    kind === "negative"
-      ? [
-          "中文：不要低清晰度，手指错误，水印，文字，畸形身体",
-          "英文 tag：lowres, bad hands, extra fingers, missing fingers, watermark, text, bad anatomy, deformed body",
-          "中文：不要模糊、jpeg 噪点、糟糕质量、脸崩",
-          "英文 tag：blurry, jpeg artifacts, worst quality, bad quality, bad face, malformed face",
-        ]
-      : [
-          "中文：一个穿白色连衣裙的少女坐在黄昏的湖边，柔和光线，远处有城市灯光",
-          "英文 tag：1girl, white dress, sitting, lakeside, dusk, soft lighting, city lights, depth of field",
-          "中文：赛博朋克街道，下雨的夜晚，霓虹灯，角色回头看镜头",
-          "英文 tag：cyberpunk city, rainy night, neon lights, street, looking back, looking at viewer",
-          "中文：黑发红眼女仆，精致发饰，半身像，动漫风，高质量",
-          "英文 tag：1girl, black hair, red eyes, maid outfit, hair ornament, upper body, anime style, best quality",
-        ];
-
-  return [
-    "You are a NovelAI / Stable Diffusion / WebUI prompt optimizer and translator.",
-    "Task: translate Chinese natural-language image descriptions into concise English prompt tags.",
-    "Convert sentence-like Chinese into AI-friendly comma-separated tags.",
-    "Prefer concrete visual tags: subject, clothing, pose, scene, lighting, camera, style, quality.",
-    "Keep existing English tags and artist names as-is.",
-    "IMPORTANT: Use spaces between words in each tag. Do NOT merge words together like 'playtheguitar'.",
-    "IMPORTANT: Always use English commas (,) followed by a space. Never output Chinese commas.",
-    "Do not output Chinese. Do not explain. Do not wrap the result in quotes or markdown.",
-    kind === "negative"
-      ? "This is a negative prompt: use exclusion tags for unwanted artifacts, anatomy issues, quality problems, text, watermarks, and blur."
-      : "This is a positive prompt: optimize for useful descriptive tags, not prose.",
-    "Examples:",
-    ...examples,
-  ].join("\n");
-}
-
-export function buildTranslationUserPrompt(text: string, direction: TranslationDirection, kind: "positive" | "negative") {
-  if (direction === "en-to-zh") {
-    return `请把下面的${kind === "negative" ? "负向" : "正向"}prompt 翻译成中文，保留它的 tag 含义：\n${text}`;
-  }
-
-  return [
-    `请把下面的中文${kind === "negative" ? "负向" : "正向"}prompt 翻译并优化成英文 AI 绘图 tag。`,
-    "要求：逗号分隔，简洁，适合 NovelAI/WebUI，保留已有英文 tag。",
-    text,
-  ].join("\n");
-}
-
 export function loadSettings(): AppSettings {
   try {
     const value = localStorage.getItem(SETTINGS_KEY);
@@ -165,110 +108,11 @@ export function loadSettings(): AppSettings {
       historyDisplayLimit: clampHistoryLimit(
         parsed.historyDisplayLimit ?? DEFAULT_SETTINGS.historyDisplayLimit,
       ),
-      translationBaseUrl: parsed.translationBaseUrl ?? DEFAULT_SETTINGS.translationBaseUrl,
-      translationApiKey: parsed.translationApiKey ?? DEFAULT_SETTINGS.translationApiKey,
-      translationModel: parsed.translationModel ?? DEFAULT_SETTINGS.translationModel,
       useImageStream: parsed.useImageStream ?? DEFAULT_SETTINGS.useImageStream,
     };
   } catch {
     return DEFAULT_SETTINGS;
   }
-}
-
-export function buildOpenAiChatCompletionsUrl(baseUrl: string) {
-  const normalized = normalizeServerUrl(baseUrl);
-  if (!normalized) {
-    return "";
-  }
-  if (normalized.endsWith("/chat/completions")) {
-    return normalized;
-  }
-  if (normalized.endsWith("/v1")) {
-    return `${normalized}/chat/completions`;
-  }
-  return `${normalized}/v1/chat/completions`;
-}
-
-export function parseOpenAiChatResponseText(text: string) {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  if (trimmed.startsWith("{")) {
-    try {
-      return extractOpenAiChoiceText(JSON.parse(trimmed));
-    } catch {
-      throw new Error("翻译接口返回了非 OpenAI JSON/SSE 格式。");
-    }
-  }
-
-  const parts: string[] = [];
-  let sawDataLine = false;
-
-  for (const rawLine of trimmed.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith(":")) {
-      continue;
-    }
-
-    if (!line.startsWith("data:")) {
-      continue;
-    }
-
-    sawDataLine = true;
-    const payload = line.slice("data:".length).trim();
-    if (!payload || payload === "[DONE]") {
-      continue;
-    }
-
-    try {
-      const content = extractOpenAiChoiceText(JSON.parse(payload));
-      if (content) {
-        parts.push(content);
-      }
-    } catch {
-      throw new Error("翻译接口返回了非 OpenAI JSON/SSE 格式。");
-    }
-  }
-
-  if (!sawDataLine && trimmed.startsWith("[")) {
-    throw new Error("翻译接口返回了非 OpenAI JSON/SSE 格式。");
-  }
-
-  return parts.join("").trim() || null;
-}
-
-export function extractOpenAiChoiceText(value: unknown) {
-  if (!isRecord(value) || !Array.isArray(value.choices)) {
-    return null;
-  }
-
-  const parts: string[] = [];
-  for (const choice of value.choices) {
-    if (!isRecord(choice)) {
-      continue;
-    }
-
-    const messageContent = isRecord(choice.message) ? choice.message.content : undefined;
-    const deltaContent = isRecord(choice.delta) ? choice.delta.content : undefined;
-    const text = choice.text;
-
-    if (typeof messageContent === "string") {
-      parts.push(messageContent);
-    } else if (typeof deltaContent === "string") {
-      parts.push(deltaContent);
-    } else if (typeof text === "string") {
-      parts.push(text);
-    }
-  }
-
-  return parts.join("").trim() || null;
-}
-
-
-export function normalizeServerUrl(value: string) {
-  return value.trim().replace(/\/+$/, "");
 }
 
 export function appendPromptText(current: string, addition: string) {
