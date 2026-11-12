@@ -143,8 +143,6 @@ export type Notice = {
   message: string;
 };
 
-export type TranslationDirection = "zh-to-en-tags" | "en-to-zh";
-
 export type AppSettings = {
   showPayloadPreview: boolean;
   enableAppLogs: boolean;
@@ -153,9 +151,6 @@ export type AppSettings = {
   novelAiProxyUrl: string;
   saveDirectory: string;
   historyDisplayLimit: number;
-  translationBaseUrl: string;
-  translationApiKey: string;
-  translationModel: string;
   useImageStream: boolean;
 };
 
