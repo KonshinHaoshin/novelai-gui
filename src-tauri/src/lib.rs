@@ -291,6 +291,16 @@ fn remember_token(token: &str) {
     }
 }
 
+/// Cache a token read from the keyring without overwriting a value that a
+/// concurrent `save_api_token` just stored.
+fn remember_token_if_missing(token: &str) {
+    if let Ok(mut cache) = token_cache().lock() {
+        if cache.as_ref().is_none_or(|cached| cached.trim().is_empty()) {
+            *cache = Some(token.to_string());
+        }
+    }
+}
+
 fn environment_token() -> Option<String> {
     std::env::var("NOVELAI_API_TOKEN")
         .ok()
@@ -307,7 +317,7 @@ async fn saved_token_exists() -> Result<bool, AppError> {
         let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
         match entry.get_password() {
             Ok(token) if !token.trim().is_empty() => {
-                remember_token(&token);
+                remember_token_if_missing(&token);
                 Ok(true)
             }
             Ok(_) | Err(keyring::Error::NoEntry) => Ok(false),
@@ -1757,7 +1767,7 @@ fn read_token() -> Result<String, AppError> {
     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME).map_err(to_error)?;
     match entry.get_password() {
         Ok(token) if !token.trim().is_empty() => {
-            remember_token(&token);
+            remember_token_if_missing(&token);
             Ok(token)
         }
         Ok(_) | Err(keyring::Error::NoEntry) => Err(AppError::new(

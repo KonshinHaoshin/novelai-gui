@@ -162,6 +162,17 @@ fn profile(model: &str) -> Option<&'static ModelProfile> {
     }
 }
 
+/// Map the GUI's legacy UC index (0 None, 1 Light, 2 Heavy, 3 Human Focus)
+/// to the official `tag_hint_uc_preset` numbering.
+pub fn legacy_uc_index_to_official(value: u32) -> u32 {
+    match value {
+        1 => TAG_HINT_LIGHT,
+        2 => TAG_HINT_HEAVY,
+        3 => TAG_HINT_HUMAN_FOCUS,
+        _ => TAG_HINT_NONE,
+    }
+}
+
 /// Quality tags for the official `tag_hint_qt` numbering.
 pub fn quality_tags_for(model: &str, quality_preset: u32) -> &'static str {
     let Some(profile) = profile(model) else {
@@ -239,5 +250,14 @@ mod tests {
             base_model_id("furry-diffusion-inpainting"),
             "nai-diffusion-furry"
         );
+    }
+
+    #[test]
+    fn maps_legacy_uc_indexes_to_official_hints() {
+        assert_eq!(legacy_uc_index_to_official(0), TAG_HINT_NONE);
+        assert_eq!(legacy_uc_index_to_official(1), TAG_HINT_LIGHT);
+        assert_eq!(legacy_uc_index_to_official(2), TAG_HINT_HEAVY);
+        assert_eq!(legacy_uc_index_to_official(3), TAG_HINT_HUMAN_FOCUS);
+        assert_eq!(legacy_uc_index_to_official(99), TAG_HINT_NONE);
     }
 }

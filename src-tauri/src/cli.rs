@@ -1,8 +1,8 @@
 //! Terminal entry point; uses the same payload builder, credentials and API as the GUI.
 use super::*;
 use crate::model_profiles::{
-    base_model_id, is_modern_image_model, quality_at_start, quality_tags_for, uc_preset_text,
-    TAG_HINT_HEAVY, TAG_HINT_NONE,
+    base_model_id, is_modern_image_model, legacy_uc_index_to_official, quality_at_start,
+    quality_tags_for, uc_preset_text, TAG_HINT_HEAVY, TAG_HINT_NONE,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -233,11 +233,26 @@ pub async fn run() -> Result<(), String> {
             print_json(&Value::Array(entries))
         }
         CliCommand::Token { command } => match command {
-            TokenCommand::Status => print_json(&serde_json::json!({
-                "environmentToken": std::env::var("NOVELAI_API_TOKEN")
-                    .map(|token| !token.trim().is_empty()).unwrap_or(false),
-                "savedToken": has_saved_api_token().await?,
-            })),
+            TokenCommand::Status => {
+                let environment_token = std::env::var("NOVELAI_API_TOKEN")
+                    .map(|token| !token.trim().is_empty())
+                    .unwrap_or(false);
+                let status = match has_saved_api_token().await {
+                    Ok(saved) => serde_json::json!({
+                        "environmentToken": environment_token,
+                        "savedToken": saved,
+                    }),
+                    Err(error) => serde_json::json!({
+                        "environmentToken": environment_token,
+                        "savedToken": false,
+                        "savedTokenError": {
+                            "code": error.code,
+                            "message": error.message,
+                        },
+                    }),
+                };
+                print_json(&status)
+            }
             TokenCommand::Set { stdin } => {
                 let token = if stdin {
                     let mut token = String::new();
@@ -472,7 +487,14 @@ fn prepare_request(args: &GenerateArgs) -> Result<ImageGenerateRequest, String> 
     let uc_preset = if medium_v5_full {
         TAG_HINT_HEAVY
     } else {
-        value["ucPreset"].as_u64().unwrap_or(0) as u32
+        let requested = value["ucPreset"].as_u64().unwrap_or(0) as u32;
+        if value["paramScheme"].as_u64() == Some(1) {
+            requested
+        } else {
+            // Presets written before the official tag_hint numbering used
+            // 0 None, 1 Light, 2 Heavy, 3 Human Focus.
+            legacy_uc_index_to_official(requested)
+        }
     };
     let uc_text = uc_preset_text(&profile_model, uc_preset);
     let negative = if medium_v5_full {
@@ -876,6 +898,7 @@ fn print_json(value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_profiles::TAG_HINT_LIGHT;
     use clap::CommandFactory;
 
     fn args(arguments: &[&str]) -> GenerateArgs {
@@ -965,6 +988,44 @@ mod tests {
             payload["parameters"]["negative_prompt"],
             "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, custom bad"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_uc_presets_before_expansion() {
+        let root = create_output_directory(&std::env::temp_dir()).unwrap();
+        let config = root.join("request.json");
+        fs::write(
+            &config,
+            r#"{"prompt":"1girl","model":"nai-diffusion-5-full","ucPreset":1,"paramScheme":0}"#,
+        )
+        .unwrap();
+        let request = prepare_request(&args(&[
+            "cli",
+            "generate",
+            "--request",
+            config.to_str().unwrap(),
+        ]))
+        .unwrap();
+        // Legacy 1 = Light; the official tag_hint number is 3.
+        assert_eq!(request.uc_preset, TAG_HINT_LIGHT);
+        assert!(request.negative_prompt.contains("0::ai-generated::"));
+
+        fs::write(
+            &config,
+            r#"{"prompt":"1girl","model":"nai-diffusion-5-full","ucPreset":3,"paramScheme":0}"#,
+        )
+        .unwrap();
+        let request = prepare_request(&args(&[
+            "cli",
+            "generate",
+            "--request",
+            config.to_str().unwrap(),
+        ]))
+        .unwrap();
+        // Legacy 3 = Human Focus, not the official Light preset.
+        assert_eq!(request.uc_preset, 4);
+        assert!(request.negative_prompt.contains("@_@"));
         fs::remove_dir_all(root).unwrap();
     }
 
