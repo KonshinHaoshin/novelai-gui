@@ -1,10 +1,10 @@
 # NovelAI GUI
 
-NovelAI GUI 是一个面向 NovelAI 图像生成 API 的桌面客户端，基于 Tauri 2、React 和 TypeScript 构建。当前重点支持 NAI 4.5 图像生成工作流，提供提示词编辑、参数配置、生成预览、图片保存和历史记录管理。
+NovelAI GUI 是一个面向 NovelAI 图像生成 API 的桌面客户端，基于 Tauri 2、React 和 TypeScript 构建。当前默认使用 NAI V5 Full，同时支持 V4 / V4.5 图像生成工作流，提供提示词编辑、参数配置、生成预览、图片保存和历史记录管理。
 
 ## 功能
 
-- 默认使用 `nai-diffusion-4-5-full`
+- 默认使用 `nai-diffusion-5-full`
 - 支持正向提示词和负向提示词
 - 支持常用尺寸预设、采样器、步数、Guidance、种子等参数
 - 自动为 V4/V4.5 模型构造 `v4_prompt` 与 `v4_negative_prompt`
@@ -86,7 +86,9 @@ macOS 的 npm 脚本默认把 Cargo 产物放在 `~/.cache/novelai-gui-target`�
 ### Token 和账户
 
 默认读取 GUI 已保存的系统凭据。设置 `NOVELAI_API_TOKEN` 时，该环境变量
-优先于系统凭据，只影响 CLI。Token 不接受命令行明文参数，也不会写入输出目录。
+优先于系统凭据，GUI 和 CLI 都会使用。Token 不接受命令行明文参数，也不会写入输出目录。
+Linux 使用 Secret Service（GNOME Keyring / KWallet）保存凭据；从源码构建需要
+`libdbus-1-dev`，如果桌面没有可用的 Secret Service，可以退回到环境变量。
 
 ```bash
 # 查看 Token 是否配置，不输出 Token 内容
@@ -103,8 +105,9 @@ npm run cli -- account
 ```
 
 CLI 不读取 GUI 的代理设置。需要代理时使用 `--proxy http://127.0.0.1:7890`；
-`account` 和 `generate` 都支持此参数。系统凭据后端与 GUI 一致，目前启用
-macOS/Windows；其他系统可以使用环境变量 Token。
+`account` 和 `generate` 都支持此参数。系统凭据后端与 GUI 一致：macOS 使用
+Keychain、Windows 使用 Credential Manager、Linux 使用 Secret Service；没有
+Secret Service 时可以用 `NOVELAI_API_TOKEN` 环境变量。
 
 ### 生成与局部重绘
 
@@ -125,8 +128,12 @@ npm run cli -- generate --image ./source.png --mask ./mask.png \
 
 默认模型 `nai-diffusion-4-5-full`，尺寸 `832×1216`，28 步，Guidance 5，
 采样器 `k_euler_ancestral`，噪声调度 `karras`，参数版本 3，输出 PNG。
-默认负向提示词为空，开启质量标签和颜色校正。图生图默认强度 0.55，
-局部重绘默认强度 1，噪声默认 0；这些值可通过选项或 JSON 覆盖。
+默认负向提示词为空，质量标签为 Standard，颜色校正开启。CLI 会在发送前
+像 GUI 一样展开质量标签和 UC 预设；`--no-quality` 等价于 `qualityPreset: 0`。
+`--request` 或共享参数预设可以设置 `qualityPreset`（0 None、1 Standard、
+3 Light）和 `ucPreset`（0 None、2 Heavy、3 Light、4 Human Focus、
+5 Furry Focus）。Medium 档会固定使用 Heavy UC 并忽略自定义负向提示词。
+图生图默认强度 0.55，局部重绘默认强度 1，噪声默认 0；这些值可通过选项或 JSON 覆盖。
 
 输入图支持 PNG/JPEG/WebP。输入图和重绘遮罩的尺寸必须一致，宽高必须是
 64 的正整数倍；遮罩必须是不透明灰度 PNG，白色重绘、黑色保留。

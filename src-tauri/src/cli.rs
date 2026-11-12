@@ -1,5 +1,9 @@
 //! Terminal entry point; uses the same payload builder, credentials and API as the GUI.
 use super::*;
+use crate::model_profiles::{
+    base_model_id, is_modern_image_model, quality_at_start, quality_tags_for, uc_preset_text,
+    TAG_HINT_HEAVY, TAG_HINT_NONE,
+};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
@@ -232,7 +236,7 @@ pub async fn run() -> Result<(), String> {
             TokenCommand::Status => print_json(&serde_json::json!({
                 "environmentToken": std::env::var("NOVELAI_API_TOKEN")
                     .map(|token| !token.trim().is_empty()).unwrap_or(false),
-                "savedToken": has_api_token().await?,
+                "savedToken": has_saved_api_token().await?,
             })),
             TokenCommand::Set { stdin } => {
                 let token = if stdin {
@@ -402,6 +406,9 @@ fn prepare_request(args: &GenerateArgs) -> Result<ImageGenerateRequest, String> 
         .as_str()
         .ok_or("stylePrompt must be a string")?;
     let main = value["prompt"].as_str().ok_or("prompt must be a string")?;
+    if style.trim().is_empty() && main.trim().is_empty() {
+        return Err("A non-empty --prompt or request prompt is required".into());
+    }
     let mut prompt = join_prompt(style, main);
     if value["transparentBackground"] == true {
         if args.model.is_none() && !object.contains_key("model") && !preset_keys.contains("model") {
@@ -432,7 +439,57 @@ fn prepare_request(args: &GenerateArgs) -> Result<ImageGenerateRequest, String> 
             prompt = join_prompt(&prompt, "transparent background");
         }
     }
+    // NovelAI does not expand qualityToggle / ucPreset server-side. Mirror the
+    // GUI by appending the official text before creating the request.
+    let profile_model = value["model"].as_str().unwrap_or_default().to_string();
+    let quality_preset = if value["qualityToggle"] == false {
+        TAG_HINT_NONE
+    } else {
+        value["qualityPreset"].as_u64().unwrap_or(1) as u32
+    };
+    let quality = quality_tags_for(&profile_model, quality_preset)
+        .trim_end_matches(|character: char| character == ',' || character.is_whitespace());
+    if !quality.is_empty() {
+        prompt = if quality_at_start(&profile_model) && !prompt.is_empty() {
+            format!("{quality}, {prompt}")
+        } else if prompt.is_empty() {
+            quality.to_string()
+        } else {
+            format!("{prompt}, {quality}")
+        };
+    }
+    let in_image_text = value["inImageText"].as_str().unwrap_or("").trim();
+    if !in_image_text.is_empty() && is_modern_image_model(&profile_model) {
+        prompt = format!("{prompt}\nText: {in_image_text}");
+    }
+
+    let custom_negative = value["negativePrompt"].as_str().unwrap_or("").trim();
+    let medium = value["effort"]
+        .as_str()
+        .is_some_and(|effort| effort.eq_ignore_ascii_case("medium"))
+        || profile_model.contains("-medium");
+    let medium_v5_full = medium && base_model_id(&profile_model) == "nai-diffusion-5-full";
+    let uc_preset = if medium_v5_full {
+        TAG_HINT_HEAVY
+    } else {
+        value["ucPreset"].as_u64().unwrap_or(0) as u32
+    };
+    let uc_text = uc_preset_text(&profile_model, uc_preset);
+    let negative = if medium_v5_full {
+        uc_text.to_string()
+    } else if uc_text.is_empty() {
+        custom_negative.to_string()
+    } else if custom_negative.is_empty() {
+        uc_text.to_string()
+    } else {
+        format!("{uc_text}, {custom_negative}")
+    };
+
     value["prompt"] = prompt.into();
+    value["negativePrompt"] = negative.into();
+    value["ucPreset"] = uc_preset.into();
+    value["qualityToggle"] = (quality_preset != TAG_HINT_NONE).into();
+    value["tagHintQt"] = quality_preset.into();
     let request: ImageGenerateRequest = serde_json::from_value(value).map_err(to_error)?;
     validate_request(&request, source_dimensions)?;
     Ok(request)
@@ -506,6 +563,9 @@ fn preset_parameter_key(key: &str) -> &str {
         "quality_toggle" => "qualityToggle",
         "transparent_background" => "transparentBackground",
         "uc_preset" => "ucPreset",
+        "quality_preset" => "qualityPreset",
+        "param_scheme" => "paramScheme",
+        "in_image_text" => "inImageText",
         "params_version" => "paramsVersion",
         "dynamic_thresholding" => "dynamicThresholding",
         "sm_dyn" => "smDyn",
@@ -546,6 +606,10 @@ fn apply_presets(
         "qualityToggle",
         "transparentBackground",
         "ucPreset",
+        "qualityPreset",
+        "effort",
+        "paramScheme",
+        "inImageText",
         "paramsVersion",
         "dynamicThresholding",
         "sm",
@@ -840,10 +904,98 @@ mod tests {
         assert_eq!(payload["parameters"]["seed"], 42);
         assert_eq!(
             payload["parameters"]["v4_prompt"]["caption"]["base_caption"],
-            "1girl"
+            "1girl, location, very aesthetic, masterpiece, no text"
         );
+        assert_eq!(payload["parameters"]["tag_hint_qt"], 1);
         assert!(prepare_request(&args(&["cli", "generate"])).is_err());
         assert!(Cli::try_parse_from(["cli", "generate", "--action", "typo"]).is_err());
+    }
+
+    #[test]
+    fn expands_gui_quality_and_uc_presets_before_sending() {
+        let request = prepare_request(&args(&[
+            "cli",
+            "generate",
+            "--prompt",
+            "1girl",
+            "--no-quality",
+        ]))
+        .unwrap();
+        assert_eq!(request.prompt, "1girl");
+        assert_eq!(request.negative_prompt, "");
+        assert_eq!(request.tag_hint_qt, Some(0));
+
+        let request = prepare_request(&args(&[
+            "cli",
+            "generate",
+            "--prompt",
+            "1girl",
+            "--negative-prompt",
+            "blurry",
+        ]))
+        .unwrap();
+        assert_eq!(
+            request.prompt,
+            "1girl, location, very aesthetic, masterpiece, no text"
+        );
+        assert_eq!(request.negative_prompt, "blurry");
+
+        let root = create_output_directory(&std::env::temp_dir()).unwrap();
+        let config = root.join("request.json");
+        fs::write(
+            &config,
+            r#"{"prompt":"1girl","negativePrompt":"custom bad","model":"nai-diffusion-5-full","qualityPreset":3,"ucPreset":2}"#,
+        )
+        .unwrap();
+        let request = prepare_request(&args(&[
+            "cli",
+            "generate",
+            "--request",
+            config.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let payload = build_image_payload(&request, false).unwrap();
+        assert_eq!(
+            payload["input"],
+            "1girl, very aesthetic, amazing quality, no text"
+        );
+        assert_eq!(payload["parameters"]["tag_hint_qt"], 3);
+        assert_eq!(payload["parameters"]["tag_hint_uc_preset"], 2);
+        assert_eq!(
+            payload["parameters"]["negative_prompt"],
+            "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, custom bad"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn medium_effort_replaces_custom_uc_and_appends_in_image_text() {
+        let root = create_output_directory(&std::env::temp_dir()).unwrap();
+        let config = root.join("request.json");
+        fs::write(
+            &config,
+            r#"{"prompt":"1girl","negativePrompt":"custom bad","effort":"medium","model":"nai-diffusion-5-full","inImageText":"HELLO"}"#,
+        )
+        .unwrap();
+        let request = prepare_request(&args(&[
+            "cli",
+            "generate",
+            "--request",
+            config.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let payload = build_image_payload(&request, false).unwrap();
+        assert_eq!(
+            payload["input"],
+            "1girl, very aesthetic, masterpiece, no text\nText: HELLO"
+        );
+        assert_eq!(
+            payload["parameters"]["negative_prompt"],
+            "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page"
+        );
+        assert_eq!(payload["parameters"]["steps"], 14);
+        assert_eq!(payload["parameters"]["ucPreset"], 2);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -950,6 +1102,7 @@ mod tests {
             "override",
             "--seed",
             "123",
+            "--no-quality",
         ]))
         .unwrap();
         assert_eq!((request.width, request.height), (128, 64));
@@ -1028,8 +1181,14 @@ mod tests {
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
             stream.write_all(&body).unwrap();
         });
-        let request =
-            prepare_request(&args(&["cli", "generate", "--prompt", "test prompt"])).unwrap();
+        let request = prepare_request(&args(&[
+            "cli",
+            "generate",
+            "--prompt",
+            "test prompt",
+            "--no-quality",
+        ]))
+        .unwrap();
         let payload = build_image_payload(&request, false).unwrap();
         // Explicit local proxy avoids inheriting the host's HTTP_PROXY in this fixture.
         let response = post_zip_like(&url, "test-token", payload.clone(), false, Some(&proxy_url))
@@ -1055,7 +1214,10 @@ mod tests {
         .unwrap();
         let payload = build_image_payload(&request, false).unwrap();
         assert_eq!(payload["model"], "nai-diffusion-5-full");
-        assert_eq!(payload["input"], "1girl, transparent background");
+        assert_eq!(
+            payload["input"],
+            "1girl, transparent background, very aesthetic, masterpiece, no text"
+        );
         assert_eq!(
             payload["parameters"]["tag_hint_transparent_background"],
             true
@@ -1126,7 +1288,8 @@ mod tests {
                 "参数",
                 "params",
                 serde_json::json!({"n_samples":2, "prompt_guidance_rescale":0.5,
-                "transparent_background":true, "params_version":4}),
+                "transparent_background":true, "params_version":4,
+                "quality_preset":3, "effort":"medium", "in_image_text":"HELLO"}),
             ),
         ];
         assert!(find_preset(&presets, "画风")
@@ -1147,6 +1310,9 @@ mod tests {
         assert_eq!(value["cfgRescale"], 0.5);
         assert_eq!(value["nSamples"], 2);
         assert_eq!(value["transparentBackground"], true);
+        assert_eq!(value["qualityPreset"], 3);
+        assert_eq!(value["effort"], "medium");
+        assert_eq!(value["inImageText"], "HELLO");
         assert!(keys.contains("paramsVersion"));
         let unsafe_preset = preset(
             "bad",
@@ -1208,7 +1374,10 @@ mod tests {
         .unwrap();
         assert_eq!(request.steps, 20);
         assert_eq!(request.params_version, 4);
-        assert_eq!(request.prompt, "anime style, test, transparent background");
+        assert_eq!(
+            request.prompt,
+            "anime style, test, transparent background, very aesthetic, masterpiece, no text"
+        );
         assert_eq!(request.negative_prompt, "json negative");
         let request = prepare_request(&args(&[
             "cli",
@@ -1228,7 +1397,10 @@ mod tests {
             "--no-transparent-background",
         ]))
         .unwrap();
-        assert_eq!(request.prompt, "new style, smile");
+        assert_eq!(
+            request.prompt,
+            "new style, smile, very aesthetic, masterpiece, no text"
+        );
         assert_eq!(request.negative_prompt, "new negative");
         assert!(!request.transparent_background);
         // Also accept the GUI's legacy shared array format.
